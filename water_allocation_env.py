@@ -1,0 +1,285 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable, Dict, Tuple
+
+import numpy as np
+
+from simulation import hydraulic_simulator
+
+
+HydraulicSimulator = Callable[[np.ndarray], np.ndarray]
+
+
+@dataclass
+class WaterAllocationConfig:
+    num_channels: int
+    horizon: int = 5
+    gate_open_min: float = 0.03
+    gate_open_max: float = 0.5
+    max_flow_per_channel: float = 40.0
+    demand_low: float = 5000.0
+    demand_high: float = 40000.0
+    demand_noise_std: float = 3.0
+    smoothness_penalty: float = 0.05
+    oversupply_penalty: float = 0.02
+    demand_satisfied_tolerance: float = 1e-3
+    channel_weights: np.ndarray | None = None
+    safe_z_max: float | None = None
+    safe_q_max: float | None = None
+    safe_qf_max: float | np.ndarray | None = None
+    safety_penalty: float = 5.0
+
+
+class WaterAllocationEnv:
+    """
+    5-step water allocation environment.
+
+    State:
+        [current_demands(N), previous_gate_openings(N)]
+
+    Action:
+        gate openings for the next period, each in [0, 1].
+    """
+
+    def __init__(
+        self,
+        config: WaterAllocationConfig,
+        hydraulic_simulator: HydraulicSimulator | None = None,
+    ):
+        self.config = config
+        self.num_channels = config.num_channels
+        self.horizon = config.horizon
+        self.channel_capacity = np.full(
+            self.num_channels, config.max_flow_per_channel, dtype=np.float32
+        )
+        if config.gate_open_min > config.gate_open_max:
+            raise ValueError("gate_open_min must be less than or equal to gate_open_max.")
+        self.channel_weights = self._build_channel_weights(config.channel_weights)
+        self.hydraulic_simulator = hydraulic_simulator or self.default_hydraulic_simulator
+        if self.hydraulic_simulator is hydraulic_simulator and self.num_channels != 3:
+            raise ValueError(
+                "simulation.hydraulic_simulator currently expects exactly 3 gate openings, "
+                f"but num_channels={self.num_channels}."
+            )
+
+        self.current_step = 0
+        self.current_demands = np.zeros(self.num_channels, dtype=np.float32)
+        self.previous_action = np.zeros(self.num_channels, dtype=np.float32)
+        self.hydraulic_state = None
+
+    @property
+    def obs_dim(self) -> int:
+        return self.num_channels * 2
+
+    @property
+    def action_dim(self) -> int:
+        return self.num_channels
+
+    def reset(self, seed: int | None = None) -> np.ndarray:
+        if seed is not None:
+            np.random.seed(seed)
+
+        self.current_step = 0
+        self.previous_action = np.zeros(self.num_channels, dtype=np.float32)
+        self.current_demands = self._sample_initial_demand()
+        self.hydraulic_state = None
+        return self._get_obs()
+
+    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, Dict]:
+        normalized_action = np.asarray(action, dtype=np.float32)
+        normalized_action = np.clip(normalized_action, 0.0, 1.0)
+        gate_action = self._scale_action_to_gate_range(normalized_action)
+
+        requested_supply = gate_action * self.channel_capacity
+        actual_supply = self.simulate_supply(gate_action)
+
+        unmet_demand = np.maximum(self.current_demands - actual_supply, 0.0)
+        oversupply = np.maximum(actual_supply - self.current_demands, 0.0)
+
+        weighted_demand = self.channel_weights * self.current_demands
+        weighted_unmet = self.channel_weights * unmet_demand
+        weighted_oversupply = self.channel_weights * oversupply
+
+        unmet_ratio = weighted_unmet.sum() / (weighted_demand.sum() + 1e-6)
+        oversupply_ratio = weighted_oversupply.sum() / (weighted_demand.sum() + 1e-6)
+        smoothness_cost = float(np.mean(np.abs(gate_action - self.previous_action)))
+        safety_violation, safety_penalty_value = self._compute_safety_penalty()
+
+        reward = (
+            1.0
+            - unmet_ratio
+            - self.config.oversupply_penalty * oversupply_ratio
+            - self.config.smoothness_penalty * smoothness_cost
+            - safety_penalty_value
+        )
+
+        self.previous_action = gate_action.copy()
+        self.current_step += 1
+        next_demand = self._transition_demand(
+            previous_demand=self.current_demands,
+            actual_supply=actual_supply,
+        )
+        all_demands_satisfied = np.all(
+            next_demand <= self.config.demand_satisfied_tolerance
+        )
+        done = (self.current_step >= self.horizon) or bool(all_demands_satisfied)
+
+        info = {
+            "normalized_action": normalized_action,
+            "gate_action": gate_action,
+            "requested_supply": requested_supply,
+            "actual_supply": actual_supply,
+            "unmet_demand": unmet_demand,
+            "oversupply": oversupply,
+            "channel_weights": self.channel_weights.copy(),
+            "unmet_ratio": unmet_ratio,
+            "safety_violation": safety_violation,
+            "safety_penalty": safety_penalty_value,
+            "all_demands_satisfied": bool(all_demands_satisfied),
+        }
+
+        if not done:
+            self.current_demands = next_demand
+        else:
+            self.current_demands = next_demand
+
+        return self._get_obs(), float(reward), done, info
+
+    def simulate_supply(self, gate_openings: np.ndarray) -> np.ndarray:
+        """
+        External hydraulic interface.
+
+        Input:
+            gate_openings: gate openings of N channels in [0, 1]
+
+        Output:
+            actual water supply of N channels within one time period
+        """
+        if self.hydraulic_simulator is hydraulic_simulator:
+            result = self.hydraulic_simulator(
+                gate_openings.astype(np.float32),
+                previous_state=self.hydraulic_state,
+                use_z00=self.current_step == 0,
+            )
+        else:
+            result = self.hydraulic_simulator(gate_openings.astype(np.float32))
+
+        if isinstance(result, tuple):
+            supply, final_state = result
+            self.hydraulic_state = final_state
+        else:
+            supply = result
+
+        supply = np.asarray(supply, dtype=np.float32)
+
+        if supply.shape != (self.num_channels,):
+            raise ValueError(
+                f"Hydraulic simulator must return shape {(self.num_channels,)}, got {supply.shape}"
+            )
+        return np.maximum(supply, 0.0)
+
+    def default_hydraulic_simulator(self, gate_openings: np.ndarray) -> np.ndarray:
+        """
+        Placeholder hydraulic simulator.
+
+        Replace this function, or pass `hydraulic_simulator=your_function`
+        when constructing the environment.
+        """
+        return gate_openings * self.channel_capacity
+
+    def _scale_action_to_gate_range(self, normalized_action: np.ndarray) -> np.ndarray:
+        gate_min = self.config.gate_open_min
+        gate_max = self.config.gate_open_max
+        return gate_min + normalized_action * (gate_max - gate_min)
+
+    def _build_channel_weights(self, channel_weights: np.ndarray | None) -> np.ndarray:
+        if channel_weights is None:
+            return np.ones(self.num_channels, dtype=np.float32)
+
+        weights = np.asarray(channel_weights, dtype=np.float32)
+        if weights.shape != (self.num_channels,):
+            raise ValueError(
+                f"channel_weights must have shape {(self.num_channels,)}, got {weights.shape}"
+            )
+        if np.any(weights < 0):
+            raise ValueError("channel_weights must be non-negative.")
+        if np.all(weights == 0):
+            raise ValueError("channel_weights cannot be all zeros.")
+        return weights
+
+    def _compute_safety_penalty(self) -> tuple[Dict[str, float], float]:
+        if not isinstance(self.hydraulic_state, dict):
+            return {"z": 0.0, "q": 0.0, "qf": 0.0}, 0.0
+
+        z_violation = 0.0
+        q_violation = 0.0
+        qf_violation = 0.0
+
+        if self.config.safe_z_max is not None:
+            z_key = "Z_max_over_time" if "Z_max_over_time" in self.hydraulic_state else "Z"
+            z_values = np.asarray(self.hydraulic_state[z_key], dtype=np.float32)
+            z_excess = np.maximum(z_values - self.config.safe_z_max, 0.0)
+            z_violation = float(z_excess.max()) if z_excess.size > 0 else 0.0
+
+        if self.config.safe_q_max is not None:
+            q_key = "Q_max_over_time" if "Q_max_over_time" in self.hydraulic_state else "Q"
+            q_values = np.asarray(self.hydraulic_state[q_key], dtype=np.float32)
+            q_excess = np.maximum(q_values - self.config.safe_q_max, 0.0)
+            q_violation = float(q_excess.max()) if q_excess.size > 0 else 0.0
+
+        if self.config.safe_qf_max is not None:
+            qf_key = "Qf_max_over_time" if "Qf_max_over_time" in self.hydraulic_state else "Qf"
+            qf_values = np.asarray(self.hydraulic_state[qf_key], dtype=np.float32)
+            safe_qf = np.asarray(self.config.safe_qf_max, dtype=np.float32)
+            if safe_qf.ndim == 0:
+                safe_qf = np.full(self.num_channels, float(safe_qf), dtype=np.float32)
+            if safe_qf.shape != (self.num_channels,):
+                raise ValueError(
+                    f"safe_qf_max must have shape {(self.num_channels,)}, got {safe_qf.shape}"
+                )
+            qf_excess = np.maximum(qf_values - safe_qf, 0.0)
+            qf_violation = float(qf_excess.max()) if qf_excess.size > 0 else 0.0
+
+        total_violation = z_violation + q_violation + qf_violation
+        safety_penalty_value = self.config.safety_penalty * total_violation
+        return (
+            {"z": z_violation, "q": q_violation, "qf": qf_violation},
+            float(safety_penalty_value),
+        )
+
+    def _sample_initial_demand(self) -> np.ndarray:
+        base = np.random.uniform(
+            self.config.demand_low,
+            self.config.demand_high,
+            size=self.num_channels,
+        )
+        noise = np.random.normal(
+            0.0, self.config.demand_noise_std, size=self.num_channels
+        )
+        demand = np.maximum(base + noise, 0.0)
+        return demand.astype(np.float32)
+
+    def _transition_demand(
+        self,
+        previous_demand: np.ndarray,
+        actual_supply: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Demand evolution for the next time period.
+
+        In the current formulation, the next-period demand is the unmet part
+        of the previous period demand.
+        """
+        next_demand = np.maximum(previous_demand - actual_supply, 0.0)
+        return next_demand.astype(np.float32)
+
+    def _get_obs(self) -> np.ndarray:
+        demand_scale = max(self.config.demand_high, 1.0)
+        obs = np.concatenate(
+            [
+                self.current_demands / demand_scale,
+                self.previous_action,
+            ]
+        )
+        return obs.astype(np.float32)
