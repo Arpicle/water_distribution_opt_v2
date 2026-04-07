@@ -93,6 +93,12 @@ Then run:
 python train.py --num-channels 4 --train-iterations 200
 ```
 
+To enable parallel rollout sampling:
+
+```bash
+python train.py --num-channels 3 --train-iterations 20 --rollout-episodes 8 --num-workers 4
+```
+
 ## How to adapt to real data
 
 1. Replace `_sample_initial_demand()` if your initial demand comes from real data.
