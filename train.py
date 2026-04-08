@@ -72,27 +72,43 @@ def _finalize_rollout_metrics(metrics: dict) -> dict:
     }
 
 
-def _format_detailed_log(iteration: int, avg_reward: float, avg_unmet: float, rollout_metrics: dict, loss_stats: dict) -> str:
-    return (
-        f"iter={iteration:04d}\n"
-        f"  summary: avg_reward={avg_reward:.4f}, avg_unmet_ratio={avg_unmet:.4f}, "
-        f"avg_episode_length={rollout_metrics['avg_episode_length']:.4f}, "
-        f"early_finished_rate={rollout_metrics['early_finished_rate']:.4f}, "
-        f"all_satisfied_rate={rollout_metrics['all_satisfied_rate']:.4f}\n"
-        f"  reward_parts: avg_step_reward={rollout_metrics['avg_step_reward']:.4f}, "
-        f"unmet_penalty={rollout_metrics['avg_unmet_penalty']:.4f}, "
-        f"oversupply_penalty={rollout_metrics['avg_oversupply_penalty']:.4f}, "
-        f"smoothness_penalty={rollout_metrics['avg_smoothness_penalty']:.4f}, "
-        f"safety_penalty={rollout_metrics['avg_safety_penalty']:.4f}, "
-        f"completion_bonus={rollout_metrics['avg_completion_bonus']:.4f}\n"
-        f"  rollout_parts: oversupply_ratio={rollout_metrics['avg_oversupply_ratio']:.4f}, "
-        f"smoothness_cost={rollout_metrics['avg_smoothness_cost']:.4f}, "
-        f"steps={rollout_metrics['step_count']}, episodes={rollout_metrics['episode_count']}\n"
-        f"  losses: policy_loss={loss_stats['policy_loss']:.4f}, "
-        f"value_loss={loss_stats['value_loss']:.4f}, "
-        f"entropy={loss_stats['entropy']:.4f}, "
-        f"total_loss={loss_stats['total_loss']:.4f}\n"
-    )
+def _build_detailed_log_record(
+    iteration: int,
+    avg_reward: float,
+    avg_unmet: float,
+    rollout_metrics: dict,
+    loss_stats: dict,
+) -> dict:
+    return {
+        "iteration": iteration,
+        "summary": {
+            "avg_reward": avg_reward,
+            "avg_unmet_ratio": avg_unmet,
+            "avg_episode_length": rollout_metrics["avg_episode_length"],
+            "early_finished_rate": rollout_metrics["early_finished_rate"],
+            "all_satisfied_rate": rollout_metrics["all_satisfied_rate"],
+        },
+        "reward_parts": {
+            "avg_step_reward": rollout_metrics["avg_step_reward"],
+            "unmet_penalty": rollout_metrics["avg_unmet_penalty"],
+            "oversupply_penalty": rollout_metrics["avg_oversupply_penalty"],
+            "smoothness_penalty": rollout_metrics["avg_smoothness_penalty"],
+            "safety_penalty": rollout_metrics["avg_safety_penalty"],
+            "completion_bonus": rollout_metrics["avg_completion_bonus"],
+        },
+        "rollout_parts": {
+            "oversupply_ratio": rollout_metrics["avg_oversupply_ratio"],
+            "smoothness_cost": rollout_metrics["avg_smoothness_cost"],
+            "steps": rollout_metrics["step_count"],
+            "episodes": rollout_metrics["episode_count"],
+        },
+        "losses": {
+            "policy_loss": loss_stats["policy_loss"],
+            "value_loss": loss_stats["value_loss"],
+            "entropy": loss_stats["entropy"],
+            "total_loss": loss_stats["total_loss"],
+        },
+    }
 
 
 def _to_jsonable(value):
@@ -364,7 +380,7 @@ def main() -> None:
     parser.add_argument("--rollout-episodes", type=int, default=64, help="Episodes per rollout")
     parser.add_argument("--num-workers", type=int, default=12, help="Parallel rollout workers")
     parser.add_argument("--model-path", type=str, default="ppo_water_model.pt", help="Model file")
-    parser.add_argument("--log-file", type=str, default="training_details.txt", help="Detailed training log file")
+    parser.add_argument("--log-file", type=str, default="training_details.jsonl", help="Detailed training log file")
     parser.add_argument("--output-dir", type=str, default="runs", help="Directory for timestamped training outputs")
     args = parser.parse_args()
 
@@ -418,14 +434,15 @@ def main() -> None:
                 f"value_loss={stats['value_loss']:.4f}"
             )
         with log_path.open("a", encoding="utf-8") as log_file:
-            log_file.write(
-                _format_detailed_log(
+            log_record = _build_detailed_log_record(
                     iteration,
                     avg_reward,
                     avg_unmet,
                     rollout_metrics,
                     stats,
                 )
+            log_file.write(
+                json.dumps(_to_jsonable(log_record), ensure_ascii=False) + "\n"
             )
         
 
