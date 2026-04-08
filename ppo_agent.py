@@ -43,8 +43,8 @@ class PPOConfig:
     value_coef: float = 0.5
     learning_rate: float = 3e-4
     rollout_episodes: int = 64
-    update_epochs: int = 10
-    minibatch_size: int = 128
+    update_epochs: int = 5
+    minibatch_size: int = 64
     max_grad_norm: float = 0.5
     hidden_dim: int = 128
 

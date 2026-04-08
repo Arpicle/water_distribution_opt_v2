@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import asdict
+import json
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -10,6 +13,8 @@ import torch
 from ppo_agent import ActorCritic, PPOAgent, PPOConfig, RolloutBuffer
 from simulation import hydraulic_simulator
 from water_allocation_env import WaterAllocationConfig, WaterAllocationEnv
+
+import time
 
 
 def _init_rollout_metrics() -> dict:
@@ -88,6 +93,42 @@ def _format_detailed_log(iteration: int, avg_reward: float, avg_unmet: float, ro
         f"entropy={loss_stats['entropy']:.4f}, "
         f"total_loss={loss_stats['total_loss']:.4f}\n"
     )
+
+
+def _to_jsonable(value):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {key: _to_jsonable(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_to_jsonable(item) for item in value]
+    return value
+
+
+def _create_run_dir(base_dir: Path) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = base_dir / timestamp
+    suffix = 1
+    while run_dir.exists():
+        run_dir = base_dir / f"{timestamp}_{suffix:02d}"
+        suffix += 1
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
+
+
+def _save_run_metadata(run_dir: Path, args: argparse.Namespace, ppo_config: PPOConfig, env_config: WaterAllocationConfig) -> None:
+    files = {
+        "args.json": vars(args),
+        "ppo_config.json": asdict(ppo_config),
+        "env_config.json": asdict(env_config),
+    }
+    for filename, payload in files.items():
+        (run_dir / filename).write_text(
+            json.dumps(_to_jsonable(payload), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
 
 def _run_rollout_worker(
@@ -319,11 +360,12 @@ def evaluate_policy(env: WaterAllocationEnv, agent: PPOAgent, episodes: int = 5)
 def main() -> None:
     parser = argparse.ArgumentParser(description="PPO for 5-step water allocation")
     parser.add_argument("--num-channels", type=int, default=3, help="Number of channels")
-    parser.add_argument("--train-iterations", type=int, default=5, help="Training rounds")
+    parser.add_argument("--train-iterations", type=int, default=20, help="Training rounds")
     parser.add_argument("--rollout-episodes", type=int, default=64, help="Episodes per rollout")
-    parser.add_argument("--num-workers", type=int, default=1, help="Parallel rollout workers")
+    parser.add_argument("--num-workers", type=int, default=12, help="Parallel rollout workers")
     parser.add_argument("--model-path", type=str, default="ppo_water_model.pt", help="Model file")
     parser.add_argument("--log-file", type=str, default="training_details.txt", help="Detailed training log file")
+    parser.add_argument("--output-dir", type=str, default="runs", help="Directory for timestamped training outputs")
     args = parser.parse_args()
 
     env_config = build_env_config(args.num_channels)
@@ -331,15 +373,21 @@ def main() -> None:
 
     ppo_config = PPOConfig(rollout_episodes=args.rollout_episodes)
     agent = PPOAgent(env.obs_dim, env.action_dim, ppo_config)
+    run_dir = _create_run_dir(Path(args.output_dir))
+    log_path = run_dir / Path(args.log_file).name
+    model_path = run_dir / Path(args.model_path).name
+    _save_run_metadata(run_dir, args, ppo_config, env_config)
 
     print(
         f"Start training: channels={args.num_channels}, horizon={env.horizon}, "
         f"obs_dim={env.obs_dim}, action_dim={env.action_dim}, workers={args.num_workers}"
     )
-    log_path = Path(args.log_file)
     log_path.write_text("", encoding="utf-8")
 
     for iteration in range(1, args.train_iterations + 1):
+
+        print("=====start")
+        t1 = time.time()
         buffer, avg_reward, avg_unmet, rollout_metrics = collect_rollouts(
             env,
             agent,
@@ -347,9 +395,21 @@ def main() -> None:
             num_workers=args.num_workers,
             base_seed=iteration * 1000,
         )
+
+        t2 = time.time()
+        print(t2-t1)
+        print("=====update")
+        
+        
         stats = agent.update(buffer)
 
-        if iteration % 10 == 0 or iteration == 1:
+        
+
+        t3 = time.time()
+        print(t3-t2)
+        print("=====log")
+
+        if iteration % 1 == 0 or iteration == 1:
             print(
                 f"iter={iteration:04d} "
                 f"avg_reward={avg_reward:.4f} "
@@ -367,8 +427,8 @@ def main() -> None:
                     stats,
                 )
             )
+        
 
-    model_path = Path(args.model_path)
     agent.save(str(model_path))
     print(f"Model saved to: {model_path.resolve()}")
 
