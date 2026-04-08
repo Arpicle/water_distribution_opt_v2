@@ -22,13 +22,14 @@ class WaterAllocationConfig:
     demand_high: float = 40000.0
     demand_noise_std: float = 3.0
     smoothness_penalty: float = 0.05
-    oversupply_penalty: float = 0.02
+    oversupply_penalty: float = 0.1
     demand_satisfied_tolerance: float = 1e-3
     channel_weights: np.ndarray | None = None
     safe_z_max: float | None = None
     safe_q_max: float | None = None
     safe_qf_max: float | np.ndarray | None = None
     safety_penalty: float = 5.0
+    early_completion_bonus: float = 1.0
 
 
 class WaterAllocationEnv:
@@ -113,6 +114,9 @@ class WaterAllocationEnv:
             - self.config.smoothness_penalty * smoothness_cost
             - safety_penalty_value
         )
+        unmet_penalty_value = unmet_ratio
+        oversupply_penalty_value = self.config.oversupply_penalty * oversupply_ratio
+        smoothness_penalty_value = self.config.smoothness_penalty * smoothness_cost
 
         self.previous_action = gate_action.copy()
         self.current_step += 1
@@ -124,6 +128,14 @@ class WaterAllocationEnv:
             next_demand <= self.config.demand_satisfied_tolerance
         )
         done = (self.current_step >= self.horizon) or bool(all_demands_satisfied)
+        remaining_steps = max(self.horizon - self.current_step, 0)
+        early_finished = bool(all_demands_satisfied) and (self.current_step < self.horizon)
+        completion_bonus = (
+            self.config.early_completion_bonus * remaining_steps
+            if early_finished
+            else 0.0
+        )
+        reward += completion_bonus
 
         info = {
             "normalized_action": normalized_action,
@@ -134,8 +146,15 @@ class WaterAllocationEnv:
             "oversupply": oversupply,
             "channel_weights": self.channel_weights.copy(),
             "unmet_ratio": unmet_ratio,
+            "oversupply_ratio": oversupply_ratio,
+            "smoothness_cost": smoothness_cost,
+            "unmet_penalty": unmet_penalty_value,
+            "oversupply_penalty_value": oversupply_penalty_value,
+            "smoothness_penalty_value": smoothness_penalty_value,
             "safety_violation": safety_violation,
             "safety_penalty": safety_penalty_value,
+            "completion_bonus": completion_bonus,
+            "early_finished": early_finished,
             "all_demands_satisfied": bool(all_demands_satisfied),
         }
 

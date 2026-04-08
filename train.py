@@ -12,6 +12,84 @@ from simulation import hydraulic_simulator
 from water_allocation_env import WaterAllocationConfig, WaterAllocationEnv
 
 
+def _init_rollout_metrics() -> dict:
+    return {
+        "reward_sum": 0.0,
+        "unmet_ratio_sum": 0.0,
+        "oversupply_ratio_sum": 0.0,
+        "smoothness_cost_sum": 0.0,
+        "unmet_penalty_sum": 0.0,
+        "oversupply_penalty_sum": 0.0,
+        "smoothness_penalty_sum": 0.0,
+        "safety_penalty_sum": 0.0,
+        "completion_bonus_sum": 0.0,
+        "episode_length_sum": 0.0,
+        "early_finished_count": 0.0,
+        "all_satisfied_count": 0.0,
+        "step_count": 0,
+        "episode_count": 0,
+    }
+
+
+def _update_rollout_metrics(metrics: dict, reward: float, info: dict) -> None:
+    metrics["reward_sum"] += float(reward)
+    metrics["unmet_ratio_sum"] += float(info["unmet_ratio"])
+    metrics["oversupply_ratio_sum"] += float(info["oversupply_ratio"])
+    metrics["smoothness_cost_sum"] += float(info["smoothness_cost"])
+    metrics["unmet_penalty_sum"] += float(info["unmet_penalty"])
+    metrics["oversupply_penalty_sum"] += float(info["oversupply_penalty_value"])
+    metrics["smoothness_penalty_sum"] += float(info["smoothness_penalty_value"])
+    metrics["safety_penalty_sum"] += float(info["safety_penalty"])
+    metrics["completion_bonus_sum"] += float(info["completion_bonus"])
+    metrics["early_finished_count"] += float(info["early_finished"])
+    metrics["all_satisfied_count"] += float(info["all_demands_satisfied"])
+    metrics["step_count"] += 1
+
+
+def _finalize_rollout_metrics(metrics: dict) -> dict:
+    step_count = max(metrics["step_count"], 1)
+    episode_count = max(metrics["episode_count"], 1)
+    return {
+        "avg_step_reward": metrics["reward_sum"] / step_count,
+        "avg_unmet_ratio": metrics["unmet_ratio_sum"] / step_count,
+        "avg_oversupply_ratio": metrics["oversupply_ratio_sum"] / step_count,
+        "avg_smoothness_cost": metrics["smoothness_cost_sum"] / step_count,
+        "avg_unmet_penalty": metrics["unmet_penalty_sum"] / step_count,
+        "avg_oversupply_penalty": metrics["oversupply_penalty_sum"] / step_count,
+        "avg_smoothness_penalty": metrics["smoothness_penalty_sum"] / step_count,
+        "avg_safety_penalty": metrics["safety_penalty_sum"] / step_count,
+        "avg_completion_bonus": metrics["completion_bonus_sum"] / step_count,
+        "avg_episode_length": metrics["episode_length_sum"] / episode_count,
+        "early_finished_rate": metrics["early_finished_count"] / episode_count,
+        "all_satisfied_rate": metrics["all_satisfied_count"] / episode_count,
+        "step_count": metrics["step_count"],
+        "episode_count": metrics["episode_count"],
+    }
+
+
+def _format_detailed_log(iteration: int, avg_reward: float, avg_unmet: float, rollout_metrics: dict, loss_stats: dict) -> str:
+    return (
+        f"iter={iteration:04d}\n"
+        f"  summary: avg_reward={avg_reward:.4f}, avg_unmet_ratio={avg_unmet:.4f}, "
+        f"avg_episode_length={rollout_metrics['avg_episode_length']:.4f}, "
+        f"early_finished_rate={rollout_metrics['early_finished_rate']:.4f}, "
+        f"all_satisfied_rate={rollout_metrics['all_satisfied_rate']:.4f}\n"
+        f"  reward_parts: avg_step_reward={rollout_metrics['avg_step_reward']:.4f}, "
+        f"unmet_penalty={rollout_metrics['avg_unmet_penalty']:.4f}, "
+        f"oversupply_penalty={rollout_metrics['avg_oversupply_penalty']:.4f}, "
+        f"smoothness_penalty={rollout_metrics['avg_smoothness_penalty']:.4f}, "
+        f"safety_penalty={rollout_metrics['avg_safety_penalty']:.4f}, "
+        f"completion_bonus={rollout_metrics['avg_completion_bonus']:.4f}\n"
+        f"  rollout_parts: oversupply_ratio={rollout_metrics['avg_oversupply_ratio']:.4f}, "
+        f"smoothness_cost={rollout_metrics['avg_smoothness_cost']:.4f}, "
+        f"steps={rollout_metrics['step_count']}, episodes={rollout_metrics['episode_count']}\n"
+        f"  losses: policy_loss={loss_stats['policy_loss']:.4f}, "
+        f"value_loss={loss_stats['value_loss']:.4f}, "
+        f"entropy={loss_stats['entropy']:.4f}, "
+        f"total_loss={loss_stats['total_loss']:.4f}\n"
+    )
+
+
 def _run_rollout_worker(
     env_config: WaterAllocationConfig,
     model_state_dict: dict,
@@ -34,12 +112,14 @@ def _run_rollout_worker(
     }
     episode_rewards = []
     unmet_ratios = []
+    metrics = _init_rollout_metrics()
 
     for episode_offset in range(num_episodes):
         obs = env.reset(seed=base_seed + episode_offset)
         done = False
         ep_reward = 0.0
         ep_unmet = []
+        ep_steps = 0
 
         while not done:
             obs_t = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
@@ -64,22 +144,28 @@ def _run_rollout_worker(
 
             ep_reward += reward
             ep_unmet.append(info["unmet_ratio"])
+            ep_steps += 1
+            _update_rollout_metrics(metrics, reward, info)
             obs = next_obs
 
         episode_rewards.append(ep_reward)
         unmet_ratios.append(float(np.mean(ep_unmet)))
+        metrics["episode_length_sum"] += ep_steps
+        metrics["episode_count"] += 1
 
     return {
         "trajectories": trajectories,
         "episode_rewards": episode_rewards,
         "unmet_ratios": unmet_ratios,
+        "metrics": metrics,
     }
 
 
-def _merge_worker_results(worker_results: list[dict]) -> tuple[RolloutBuffer, float, float]:
+def _merge_worker_results(worker_results: list[dict]) -> tuple[RolloutBuffer, float, float, dict]:
     buffer = RolloutBuffer()
     episode_rewards = []
     unmet_ratios = []
+    merged_metrics = _init_rollout_metrics()
 
     for result in worker_results:
         traj = result["trajectories"]
@@ -91,8 +177,15 @@ def _merge_worker_results(worker_results: list[dict]) -> tuple[RolloutBuffer, fl
         buffer.values.extend(traj["values"])
         episode_rewards.extend(result["episode_rewards"])
         unmet_ratios.extend(result["unmet_ratios"])
+        for key, value in result["metrics"].items():
+            merged_metrics[key] += value
 
-    return buffer, float(np.mean(episode_rewards)), float(np.mean(unmet_ratios))
+    return (
+        buffer,
+        float(np.mean(episode_rewards)),
+        float(np.mean(unmet_ratios)),
+        _finalize_rollout_metrics(merged_metrics),
+    )
 
 
 def collect_rollouts(
@@ -106,12 +199,14 @@ def collect_rollouts(
         buffer = RolloutBuffer()
         episode_rewards = []
         unmet_ratios = []
+        metrics = _init_rollout_metrics()
 
         for episode_idx in range(rollout_episodes):
             obs = env.reset(seed=base_seed + episode_idx)
             done = False
             ep_reward = 0.0
             ep_unmet = []
+            ep_steps = 0
 
             while not done:
                 action, log_prob, value = agent.select_action(obs)
@@ -126,12 +221,21 @@ def collect_rollouts(
 
                 ep_reward += reward
                 ep_unmet.append(info["unmet_ratio"])
+                ep_steps += 1
+                _update_rollout_metrics(metrics, reward, info)
                 obs = next_obs
 
             episode_rewards.append(ep_reward)
             unmet_ratios.append(float(np.mean(ep_unmet)))
+            metrics["episode_length_sum"] += ep_steps
+            metrics["episode_count"] += 1
 
-        return buffer, float(np.mean(episode_rewards)), float(np.mean(unmet_ratios))
+        return (
+            buffer,
+            float(np.mean(episode_rewards)),
+            float(np.mean(unmet_ratios)),
+            _finalize_rollout_metrics(metrics),
+        )
 
     episodes_per_worker = [rollout_episodes // num_workers] * num_workers
     for worker_idx in range(rollout_episodes % num_workers):
@@ -215,10 +319,11 @@ def evaluate_policy(env: WaterAllocationEnv, agent: PPOAgent, episodes: int = 5)
 def main() -> None:
     parser = argparse.ArgumentParser(description="PPO for 5-step water allocation")
     parser.add_argument("--num-channels", type=int, default=3, help="Number of channels")
-    parser.add_argument("--train-iterations", type=int, default=200, help="Training rounds")
+    parser.add_argument("--train-iterations", type=int, default=5, help="Training rounds")
     parser.add_argument("--rollout-episodes", type=int, default=64, help="Episodes per rollout")
     parser.add_argument("--num-workers", type=int, default=1, help="Parallel rollout workers")
     parser.add_argument("--model-path", type=str, default="ppo_water_model.pt", help="Model file")
+    parser.add_argument("--log-file", type=str, default="training_details.txt", help="Detailed training log file")
     args = parser.parse_args()
 
     env_config = build_env_config(args.num_channels)
@@ -231,9 +336,11 @@ def main() -> None:
         f"Start training: channels={args.num_channels}, horizon={env.horizon}, "
         f"obs_dim={env.obs_dim}, action_dim={env.action_dim}, workers={args.num_workers}"
     )
+    log_path = Path(args.log_file)
+    log_path.write_text("", encoding="utf-8")
 
     for iteration in range(1, args.train_iterations + 1):
-        buffer, avg_reward, avg_unmet = collect_rollouts(
+        buffer, avg_reward, avg_unmet, rollout_metrics = collect_rollouts(
             env,
             agent,
             args.rollout_episodes,
@@ -249,6 +356,16 @@ def main() -> None:
                 f"avg_unmet_ratio={avg_unmet:.4f} "
                 f"policy_loss={stats['policy_loss']:.4f} "
                 f"value_loss={stats['value_loss']:.4f}"
+            )
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(
+                _format_detailed_log(
+                    iteration,
+                    avg_reward,
+                    avg_unmet,
+                    rollout_metrics,
+                    stats,
+                )
             )
 
     model_path = Path(args.model_path)

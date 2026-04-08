@@ -112,7 +112,7 @@ class PPOAgent:
         dataset_size = obs_t.size(0)
         indices = np.arange(dataset_size)
 
-        stats = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
+        stats = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "total_loss": 0.0}
         updates = 0
 
         for _ in range(self.config.update_epochs):
@@ -153,6 +153,7 @@ class PPOAgent:
                 stats["policy_loss"] += float(policy_loss.item())
                 stats["value_loss"] += float(value_loss.item())
                 stats["entropy"] += float(entropy_bonus.item())
+                stats["total_loss"] += float(loss.item())
                 updates += 1
 
         if updates > 0:

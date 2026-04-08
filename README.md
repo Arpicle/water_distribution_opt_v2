@@ -44,6 +44,7 @@ next_demand = max(previous_demand - actual_supply, 0)
   - gate changes between adjacent periods have a small smoothness penalty
   - channel importance can be controlled by `channel_weights`
   - safety violations on `Z_res`, `Q_res`, and `Qf` can trigger a large penalty
+  - early completion can receive an additional bonus based on remaining steps
 
 ## Files
 
@@ -135,5 +136,14 @@ config = WaterAllocationConfig(
     safe_q_max=3.0,
     safe_qf_max=np.array([2000.0, 1800.0, 1500.0], dtype=np.float32),
     safety_penalty=5.0,
+)
+```
+
+Early completion example:
+
+```python
+config = WaterAllocationConfig(
+    num_channels=3,
+    early_completion_bonus=1.0,
 )
 ```
