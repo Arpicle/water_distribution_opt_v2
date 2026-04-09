@@ -37,7 +37,7 @@ class WaterAllocationEnv:
     5-step water allocation environment.
 
     State:
-        [current_demands(N), previous_gate_openings(N)]
+        [current_demands(N), previous_gate_openings(N), gate_Z(N), gate_Q(N)]
 
     Action:
         gate openings for the next period, each in [0, 1].
@@ -71,7 +71,7 @@ class WaterAllocationEnv:
 
     @property
     def obs_dim(self) -> int:
-        return self.num_channels * 2
+        return self.num_channels * 4
 
     @property
     def action_dim(self) -> int:
@@ -295,10 +295,38 @@ class WaterAllocationEnv:
 
     def _get_obs(self) -> np.ndarray:
         demand_scale = max(self.config.demand_high, 1.0)
-        obs = np.concatenate(
-            [
-                self.current_demands / demand_scale,
-                self.previous_action,
-            ]
-        )
+        gate_z, gate_q = self._get_gate_hydraulic_features()
+        obs_parts = [
+            self.current_demands / demand_scale,
+            self.previous_action,
+            gate_z,
+            gate_q,
+        ]
+        obs = np.concatenate(obs_parts)
         return obs.astype(np.float32)
+
+    def _get_gate_hydraulic_features(self) -> tuple[np.ndarray, np.ndarray]:
+        if not isinstance(self.hydraulic_state, dict):
+            zeros = np.zeros(self.num_channels, dtype=np.float32)
+            return zeros, zeros.copy()
+
+        gate_z = np.asarray(
+            self.hydraulic_state.get(
+                "gate_Z",
+                np.zeros(self.num_channels, dtype=np.float32),
+            ),
+            dtype=np.float32,
+        )
+        gate_q = np.asarray(
+            self.hydraulic_state.get(
+                "gate_Q",
+                np.zeros(self.num_channels, dtype=np.float32),
+            ),
+            dtype=np.float32,
+        )
+        if gate_z.shape != (self.num_channels,) or gate_q.shape != (self.num_channels,):
+            raise ValueError(
+                "Hydraulic gate-state features must match num_channels: "
+                f"expected {(self.num_channels,)}, got gate_Z={gate_z.shape}, gate_Q={gate_q.shape}."
+            )
+        return gate_z, gate_q

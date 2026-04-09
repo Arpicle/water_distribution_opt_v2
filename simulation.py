@@ -507,6 +507,24 @@ def _build_initial_profile(value, length):
     return np.full(length, value, dtype=np.float32)
 
 
+def _extract_gate_section_state(x, z_values, q_values, gate_specs):
+    gate_z = []
+    gate_q = []
+    x_values = np.asarray(x, dtype=np.float32)
+    z_array = np.asarray(z_values, dtype=np.float32)
+    q_array = np.asarray(q_values, dtype=np.float32)
+
+    for position, _ in gate_specs:
+        gate_idx = int(np.argmin(np.abs(x_values - float(position))))
+        gate_z.append(z_array[gate_idx])
+        gate_q.append(q_array[gate_idx])
+
+    return (
+        np.asarray(gate_z, dtype=np.float32),
+        np.asarray(gate_q, dtype=np.float32),
+    )
+
+
 def hydraulic_simulator(e, previous_state=None, use_z00=False):
     """
     Run one hydraulic simulation period.
@@ -580,10 +598,13 @@ def hydraulic_simulator(e, previous_state=None, use_z00=False):
         for ii in range(len(Qf_res)):
             water_volume.append(np.trapezoid(Qf_res[ii], x=t))
         water_volume = np.asarray(water_volume, dtype=np.float32)
+    gate_z, gate_q = _extract_gate_section_state(x, Z_res, Q_res, gate_specs)
 
     final_state = {
         "Z": np.asarray(Z_res, dtype=np.float32),
         "Q": np.asarray(Q_res, dtype=np.float32),
+        "gate_Z": gate_z,
+        "gate_Q": gate_q,
         "Qf": water_volume.copy(),
         "Z_max_over_time": np.asarray(safety_trace["Z_max_over_time"], dtype=np.float32),
         "Q_max_over_time": np.asarray(safety_trace["Q_max_over_time"], dtype=np.float32),
