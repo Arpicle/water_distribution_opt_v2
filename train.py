@@ -147,6 +147,49 @@ def _save_run_metadata(run_dir: Path, args: argparse.Namespace, ppo_config: PPOC
         )
 
 
+def _load_resume_state(agent: PPOAgent, resume_path: Path) -> dict:
+    checkpoint = torch.load(resume_path, map_location=agent.device)
+
+    # Support both full checkpoints and plain model state_dict files.
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        agent.model.load_state_dict(checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint:
+            agent.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        return {
+            "start_iteration": int(checkpoint.get("iteration", 0)) + 1,
+            "resume_type": "checkpoint",
+        }
+
+    if isinstance(checkpoint, dict):
+        agent.model.load_state_dict(checkpoint)
+        return {
+            "start_iteration": 1,
+            "resume_type": "model_only",
+        }
+
+    raise ValueError(f"Unsupported resume file format: {resume_path}")
+
+
+def _save_checkpoint(run_dir: Path, agent: PPOAgent, iteration: int) -> None:
+    checkpoint = {
+        "iteration": iteration,
+        "model_state_dict": agent.model.state_dict(),
+        "optimizer_state_dict": agent.optimizer.state_dict(),
+    }
+    torch.save(checkpoint, run_dir / "checkpoint_latest.pt")
+
+
+def _save_periodic_checkpoint(run_dir: Path, agent: PPOAgent, iteration: int) -> Path:
+    checkpoint = {
+        "iteration": iteration,
+        "model_state_dict": agent.model.state_dict(),
+        "optimizer_state_dict": agent.optimizer.state_dict(),
+    }
+    checkpoint_path = run_dir / f"checkpoint_iter_{iteration:04d}.pt"
+    torch.save(checkpoint, checkpoint_path)
+    return checkpoint_path
+
+
 def _run_rollout_worker(
     env_config: WaterAllocationConfig,
     model_state_dict: dict,
@@ -251,7 +294,7 @@ def collect_rollouts(
     rollout_episodes: int,
     num_workers: int = 1,
     base_seed: int = 0,
-) -> tuple[RolloutBuffer, float, float]:
+) -> tuple[RolloutBuffer, float, float, dict]:
     if num_workers <= 1:
         buffer = RolloutBuffer()
         episode_rewards = []
@@ -336,8 +379,8 @@ def build_env_config(num_channels: int) -> WaterAllocationConfig:
         demand_low=5000,
         demand_high=40000,
         demand_noise_std=3.0,
-        smoothness_penalty=0.05,
-        oversupply_penalty=0.02,
+        smoothness_penalty=0.02,
+        oversupply_penalty=0.07,
         demand_satisfied_tolerance=1e-3,
         channel_weights=np.array([2.0, 1.0, 1.5], dtype=np.float32),
         safe_z_max=3.0,
@@ -347,13 +390,32 @@ def build_env_config(num_channels: int) -> WaterAllocationConfig:
     )
 
 
-def evaluate_policy(env: WaterAllocationEnv, agent: PPOAgent, episodes: int = 5) -> None:
-    print("\n=== Evaluation ===")
+def evaluate_policy(
+    env: WaterAllocationEnv,
+    agent: PPOAgent,
+    episodes: int = 5,
+    seed_offset: int = 0,
+    verbose: bool = True,
+) -> dict:
+    if verbose:
+        print("\n=== Evaluation ===")
+
+    episode_records = []
+    total_rewards = []
+    total_unmet_ratios = []
+    total_lengths = []
+    early_finished_count = 0
+    all_satisfied_count = 0
+
     for episode in range(episodes):
-        obs = env.reset(seed=episode)
+        obs = env.reset(seed=seed_offset + episode)
         done = False
         total_reward = 0.0
         step_id = 0
+        unmet_ratios = []
+        episode_steps = []
+        episode_early_finished = False
+        episode_all_satisfied = False
         while not done:
             current_demand = env.current_demands.copy()
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=agent.device).unsqueeze(0)
@@ -362,15 +424,61 @@ def evaluate_policy(env: WaterAllocationEnv, agent: PPOAgent, episodes: int = 5)
                 action = (alpha / (alpha + beta)).squeeze(0).cpu().numpy()
             obs, reward, done, info = env.step(action)
             total_reward += reward
-            print(
-                f"episode={episode + 1}, step={step_id + 1}, "
-                f"demand={np.round(current_demand, 2)}, "
-                f"gate={np.round(info['gate_action'], 3)}, "
-                f"supply={np.round(info['actual_supply'], 2)}, "
-                f"unmet={np.round(info['unmet_demand'], 2)}"
+            unmet_ratios.append(float(info["unmet_ratio"]))
+            episode_early_finished = episode_early_finished or bool(info["early_finished"])
+            episode_all_satisfied = episode_all_satisfied or bool(info["all_demands_satisfied"])
+            episode_steps.append(
+                {
+                    "step": step_id + 1,
+                    "demand": np.round(current_demand, 2).tolist(),
+                    "gate": np.round(info["gate_action"], 3).tolist(),
+                    "supply": np.round(info["actual_supply"], 2).tolist(),
+                    "unmet": np.round(info["unmet_demand"], 2).tolist(),
+                    "reward": float(reward),
+                    "unmet_ratio": float(info["unmet_ratio"]),
+                    "oversupply_ratio": float(info["oversupply_ratio"]),
+                    "smoothness_cost": float(info["smoothness_cost"]),
+                    "safety_penalty": float(info["safety_penalty"]),
+                    "completion_bonus": float(info["completion_bonus"]),
+                }
             )
+            if verbose:
+                print(
+                    f"episode={episode + 1}, step={step_id + 1}, "
+                    f"demand={np.round(current_demand, 2)}, "
+                    f"gate={np.round(info['gate_action'], 3)}, "
+                    f"supply={np.round(info['actual_supply'], 2)}, "
+                    f"unmet={np.round(info['unmet_demand'], 2)}"
+                )
             step_id += 1
-        print(f"episode={episode + 1}, total_reward={total_reward:.3f}")
+        total_rewards.append(total_reward)
+        total_unmet_ratios.append(float(np.mean(unmet_ratios)) if unmet_ratios else 0.0)
+        total_lengths.append(step_id)
+        early_finished_count += float(episode_early_finished)
+        all_satisfied_count += float(episode_all_satisfied)
+        episode_records.append(
+            {
+                "episode": episode + 1,
+                "total_reward": float(total_reward),
+                "avg_unmet_ratio": float(np.mean(unmet_ratios)) if unmet_ratios else 0.0,
+                "length": step_id,
+                "early_finished": episode_early_finished,
+                "all_demands_satisfied": episode_all_satisfied,
+                "steps": episode_steps,
+            }
+        )
+        if verbose:
+            print(f"episode={episode + 1}, total_reward={total_reward:.3f}")
+
+    return {
+        "episodes": episodes,
+        "avg_reward": float(np.mean(total_rewards)) if total_rewards else 0.0,
+        "avg_unmet_ratio": float(np.mean(total_unmet_ratios)) if total_unmet_ratios else 0.0,
+        "avg_episode_length": float(np.mean(total_lengths)) if total_lengths else 0.0,
+        "early_finished_rate": early_finished_count / max(episodes, 1),
+        "all_satisfied_rate": all_satisfied_count / max(episodes, 1),
+        "episode_results": episode_records,
+    }
 
 
 def main() -> None:
@@ -381,7 +489,12 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=12, help="Parallel rollout workers")
     parser.add_argument("--model-path", type=str, default="ppo_water_model.pt", help="Model file")
     parser.add_argument("--log-file", type=str, default="training_details.jsonl", help="Detailed training log file")
+    parser.add_argument("--eval-log-file", type=str, default="evaluation_details.jsonl", help="Detailed evaluation log file")
     parser.add_argument("--output-dir", type=str, default="runs", help="Directory for timestamped training outputs")
+    parser.add_argument("--resume", type=str, default="", help="Resume from model .pt or checkpoint .pt")
+    parser.add_argument("--checkpoint-interval", type=int, default=5, help="Save a named checkpoint every N iterations")
+    parser.add_argument("--eval-interval", type=int, default=5, help="Run evaluation every N iterations")
+    parser.add_argument("--eval-episodes", type=int, default=5, help="Evaluation episodes per run")
     args = parser.parse_args()
 
     env_config = build_env_config(args.num_channels)
@@ -391,16 +504,42 @@ def main() -> None:
     agent = PPOAgent(env.obs_dim, env.action_dim, ppo_config)
     run_dir = _create_run_dir(Path(args.output_dir))
     log_path = run_dir / Path(args.log_file).name
+    eval_log_path = run_dir / Path(args.eval_log_file).name
     model_path = run_dir / Path(args.model_path).name
+    checkpoint_path = run_dir / "checkpoint_latest.pt"
     _save_run_metadata(run_dir, args, ppo_config, env_config)
+    start_iteration = 1
+    resume_info = None
+    if args.resume:
+        resume_path = Path(args.resume)
+        resume_info = _load_resume_state(agent, resume_path)
+        start_iteration = resume_info["start_iteration"]
+        (run_dir / "resume_info.json").write_text(
+            json.dumps(
+                {
+                    "resume_path": str(resume_path),
+                    "resume_type": resume_info["resume_type"],
+                    "start_iteration": start_iteration,
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
 
     print(
         f"Start training: channels={args.num_channels}, horizon={env.horizon}, "
         f"obs_dim={env.obs_dim}, action_dim={env.action_dim}, workers={args.num_workers}"
     )
+    if resume_info is not None:
+        print(
+            f"Resume training from: {Path(args.resume).resolve()} "
+            f"(type={resume_info['resume_type']}, start_iteration={start_iteration})"
+        )
     log_path.write_text("", encoding="utf-8")
+    eval_log_path.write_text("", encoding="utf-8")
 
-    for iteration in range(1, args.train_iterations + 1):
+    for iteration in range(start_iteration, args.train_iterations + 1):
 
         print("=====start")
         t1 = time.time()
@@ -444,12 +583,67 @@ def main() -> None:
             log_file.write(
                 json.dumps(_to_jsonable(log_record), ensure_ascii=False) + "\n"
             )
+        _save_checkpoint(run_dir, agent, iteration)
+        if args.checkpoint_interval > 0 and iteration % args.checkpoint_interval == 0:
+            _save_periodic_checkpoint(run_dir, agent, iteration)
+        if args.eval_interval > 0 and iteration % args.eval_interval == 0:
+            eval_results = evaluate_policy(
+                env,
+                agent,
+                episodes=args.eval_episodes,
+                seed_offset=iteration * 10000,
+                verbose=False,
+            )
+            eval_record = {
+                "iteration": iteration,
+                "summary": {
+                    "avg_reward": eval_results["avg_reward"],
+                    "avg_unmet_ratio": eval_results["avg_unmet_ratio"],
+                    "avg_episode_length": eval_results["avg_episode_length"],
+                    "early_finished_rate": eval_results["early_finished_rate"],
+                    "all_satisfied_rate": eval_results["all_satisfied_rate"],
+                },
+                "episode_results": eval_results["episode_results"],
+            }
+            with eval_log_path.open("a", encoding="utf-8") as eval_log_file:
+                eval_log_file.write(
+                    json.dumps(_to_jsonable(eval_record), ensure_ascii=False) + "\n"
+                )
+            print(
+                f"eval@iter={iteration:04d} "
+                f"avg_reward={eval_results['avg_reward']:.4f} "
+                f"avg_unmet_ratio={eval_results['avg_unmet_ratio']:.4f}"
+            )
         
 
     agent.save(str(model_path))
     print(f"Model saved to: {model_path.resolve()}")
+    print(f"Checkpoint saved to: {checkpoint_path.resolve()}")
+    print(f"Evaluation log saved to: {eval_log_path.resolve()}")
 
-    evaluate_policy(env, agent)
+    final_eval = evaluate_policy(
+        env,
+        agent,
+        episodes=args.eval_episodes,
+        seed_offset=args.train_iterations * 10000 + 1,
+        verbose=True,
+    )
+    final_eval_record = {
+        "iteration": args.train_iterations,
+        "phase": "final",
+        "summary": {
+            "avg_reward": final_eval["avg_reward"],
+            "avg_unmet_ratio": final_eval["avg_unmet_ratio"],
+            "avg_episode_length": final_eval["avg_episode_length"],
+            "early_finished_rate": final_eval["early_finished_rate"],
+            "all_satisfied_rate": final_eval["all_satisfied_rate"],
+        },
+        "episode_results": final_eval["episode_results"],
+    }
+    with eval_log_path.open("a", encoding="utf-8") as eval_log_file:
+        eval_log_file.write(
+            json.dumps(_to_jsonable(final_eval_record), ensure_ascii=False) + "\n"
+        )
 
 
 if __name__ == "__main__":

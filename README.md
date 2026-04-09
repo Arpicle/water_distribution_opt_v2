@@ -100,6 +100,29 @@ To enable parallel rollout sampling:
 python train.py --num-channels 3 --train-iterations 20 --rollout-episodes 8 --num-workers 4
 ```
 
+To periodically save named checkpoints and run evaluation:
+
+```bash
+python train.py --num-channels 3 --train-iterations 50 --checkpoint-interval 5 --eval-interval 5 --eval-episodes 5
+```
+
+Each run creates a timestamped folder under `--output-dir` and stores:
+
+- `args.json`
+- `ppo_config.json`
+- `env_config.json`
+- `training_details.jsonl`
+- `evaluation_details.jsonl`
+- `checkpoint_latest.pt`
+- periodic `checkpoint_iter_XXXX.pt`
+- final model file
+
+To resume training from a saved checkpoint:
+
+```bash
+python train.py --resume runs/20260408_120000/checkpoint_latest.pt
+```
+
 ## How to adapt to real data
 
 1. Replace `_sample_initial_demand()` if your initial demand comes from real data.
