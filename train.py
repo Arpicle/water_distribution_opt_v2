@@ -382,10 +382,10 @@ def build_env_config(num_channels: int) -> WaterAllocationConfig:
         smoothness_penalty=0.02,
         oversupply_penalty=0.7,
         demand_satisfied_tolerance=1e-3,
-        channel_weights=np.array([2.0, 1.0, 1.5], dtype=np.float32),
+        channel_weights=np.array([1.0, 1.5, 2.0], dtype=np.float32),
         safe_h_max=3.0,
         safe_q_max=3.5,
-        safe_qf_max=np.array([1.1, 1.2, 1.0], dtype=np.float32),
+        safe_qf_max=np.array([1.0, 1.2, 1.1], dtype=np.float32),
         safety_penalty=5.0,
     )
 

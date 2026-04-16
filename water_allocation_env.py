@@ -37,7 +37,7 @@ class WaterAllocationEnv:
     5-step water allocation environment.
 
     State:
-        [current_demands(N), previous_gate_openings(N), gate_Z(N), gate_Q(N)]
+        [current_demands(N), previous_gate_openings(N), gate_Z(N), gate_Q(N), current_step_ratio(1)]
 
     Action:
         gate openings for the next period, each in [0, 1].
@@ -71,7 +71,7 @@ class WaterAllocationEnv:
 
     @property
     def obs_dim(self) -> int:
-        return self.num_channels * 4
+        return self.num_channels * 4 + 1
 
     @property
     def action_dim(self) -> int:
@@ -296,11 +296,16 @@ class WaterAllocationEnv:
     def _get_obs(self) -> np.ndarray:
         demand_scale = max(self.config.demand_high, 1.0)
         gate_z, gate_q = self._get_gate_hydraulic_features()
+        step_ratio = np.array(
+            [self.current_step / max(self.horizon, 1)],
+            dtype=np.float32,
+        )
         obs_parts = [
             self.current_demands / demand_scale,
             self.previous_action,
             gate_z,
             gate_q,
+            step_ratio,
         ]
         obs = np.concatenate(obs_parts)
         return obs.astype(np.float32)
