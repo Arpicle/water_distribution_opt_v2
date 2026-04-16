@@ -25,7 +25,7 @@ class WaterAllocationConfig:
     oversupply_penalty: float = 0.1
     demand_satisfied_tolerance: float = 1e-3
     channel_weights: np.ndarray | None = None
-    safe_z_max: float | None = None
+    safe_h_max: float | None = None
     safe_q_max: float | None = None
     safe_qf_max: float | np.ndarray | None = None
     safety_penalty: float = 5.0
@@ -179,7 +179,7 @@ class WaterAllocationEnv:
             result = self.hydraulic_simulator(
                 gate_openings.astype(np.float32),
                 previous_state=self.hydraulic_state,
-                use_z00=self.current_step == 0,
+                use_h00=self.current_step == 0,
             )
         else:
             result = self.hydraulic_simulator(gate_openings.astype(np.float32))
@@ -229,17 +229,17 @@ class WaterAllocationEnv:
 
     def _compute_safety_penalty(self) -> tuple[Dict[str, float], float]:
         if not isinstance(self.hydraulic_state, dict):
-            return {"z": 0.0, "q": 0.0, "qf": 0.0}, 0.0
+            return {"h": 0.0, "q": 0.0, "qf": 0.0}, 0.0
 
-        z_violation = 0.0
+        h_violation = 0.0
         q_violation = 0.0
         qf_violation = 0.0
 
-        if self.config.safe_z_max is not None:
-            z_key = "Z_max_over_time" if "Z_max_over_time" in self.hydraulic_state else "Z"
-            z_values = np.asarray(self.hydraulic_state[z_key], dtype=np.float32)
-            z_excess = np.maximum(z_values - self.config.safe_z_max, 0.0)
-            z_violation = float(z_excess.max()) if z_excess.size > 0 else 0.0
+        if self.config.safe_h_max is not None:
+            h_key = "h_max_over_time" if "h_max_over_time" in self.hydraulic_state else "h"
+            h_values = np.asarray(self.hydraulic_state[h_key], dtype=np.float32)
+            h_excess = np.maximum(h_values - self.config.safe_h_max, 0.0)
+            h_violation = float(h_excess.max()) if h_excess.size > 0 else 0.0
 
         if self.config.safe_q_max is not None:
             q_key = "Q_max_over_time" if "Q_max_over_time" in self.hydraulic_state else "Q"
@@ -260,10 +260,10 @@ class WaterAllocationEnv:
             qf_excess = np.maximum(qf_values - safe_qf, 0.0)
             qf_violation = float(qf_excess.max()) if qf_excess.size > 0 else 0.0
 
-        total_violation = z_violation + q_violation + qf_violation
+        total_violation = h_violation + q_violation + qf_violation
         safety_penalty_value = self.config.safety_penalty * total_violation
         return (
-            {"z": z_violation, "q": q_violation, "qf": qf_violation},
+            {"h": h_violation, "q": q_violation, "qf": qf_violation},
             float(safety_penalty_value),
         )
 

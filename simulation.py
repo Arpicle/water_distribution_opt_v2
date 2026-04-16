@@ -3,6 +3,11 @@ import bisect
 import time
 
 
+CHANNEL_CAMBER = np.pi / 12
+CHANNEL_SLOPE = 1.0 / 1500.0
+CHANNEL_BOTTOM_WIDTH = 1.16
+
+
 def make_coe_array(array):
     half_term = ((array[0:-1] + array[1:])/2.0)
     return np.append(half_term, array[-1])
@@ -47,6 +52,8 @@ class SaintVenantSolver:
         self.N = n_sections
         self.x = x
         self.t = t
+        self.channel_length = float(np.max(self.x))
+        self.Zd = (self.channel_length - self.x) * CHANNEL_SLOPE
         
         # self.dx = dx
         self.dx = ((self.x[1:] - self.x[0:-1]))
@@ -152,7 +159,7 @@ class SaintVenantSolver:
             Zd = fsc[ii][3]
 
             A_coe = sigma_s*b*e
-            z = self.Z[indices[ii]]
+            z = self.Z[indices[ii]] - self.Zd[indices[ii]]
 
             qf = A_coe * np.sqrt(2.0*self.g*(z))
             (self.Qf).append(qf)
@@ -161,12 +168,10 @@ class SaintVenantSolver:
     def set_coefficients(self, Z, Q, q):
         # 矩形渠道
 
-        camber = np.pi/12
-        slop = 1.0/1500.0
-        channel_length = 1000
-        d = 1.16
+        camber = CHANNEL_CAMBER
+        d = CHANNEL_BOTTOM_WIDTH
         
-        h = Z - ((channel_length - self.x)*slop)
+        h = Z - self.Zd
 
         self.B = 2.0*h*np.tan(camber) + d
         P = d + 2.0*h/np.cos(camber)
@@ -378,8 +383,10 @@ class SaintVenantSolver:
         self.Z = self.Z_next.copy()
         self.Q = self.Q_next.copy()
         self.update_Qf()
+
+        h = self.Z - self.Zd
             
-        return self.Z, self.Q, self.Qf
+        return h, self.Z, self.Q, self.Qf
 
 # 使用示例
 
@@ -437,15 +444,15 @@ def sim_run(Z0, Q0, Q_up, Z_down, x, t, sub_channel, par_sc):
     Z_evl = []
     Q_evl = []
     Qf = []
-    z_max_over_time = np.full(len(x), -np.inf, dtype=np.float32)
+    h_max_over_time = np.full(len(x), -np.inf, dtype=np.float32)
     q_max_over_time = np.full(len(x), -np.inf, dtype=np.float32)
     qf_max_over_time = None
 
     for ii, tt in enumerate(t):
         up_boundary = Q_up
         down_boundary = Z_down
-        Z_res, Q_res, Qf_res = solver.solve_one_step(up_boundary, down_boundary, 3)
-        z_max_over_time = np.maximum(z_max_over_time, np.asarray(Z_res, dtype=np.float32))
+        h, Z_res, Q_res, Qf_res = solver.solve_one_step(up_boundary, down_boundary, 3)
+        h_max_over_time = np.maximum(h_max_over_time, np.asarray(h, dtype=np.float32))
         q_max_over_time = np.maximum(q_max_over_time, np.asarray(Q_res, dtype=np.float32))
         qf_array = np.asarray(Qf_res, dtype=np.float32)
         if qf_max_over_time is None:
@@ -464,7 +471,7 @@ def sim_run(Z0, Q0, Q_up, Z_down, x, t, sub_channel, par_sc):
         qf_max_over_time = np.zeros(0, dtype=np.float32)
 
     safety_trace = {
-        "Z_max_over_time": z_max_over_time,
+        "h_max_over_time": h_max_over_time,
         "Q_max_over_time": q_max_over_time,
         "Qf_max_over_time": qf_max_over_time,
     }
@@ -495,11 +502,12 @@ def _build_default_context():
     return {
         "x": x,
         "t": t,
-        "Z00": 0.9,
+        "h00": 0.9,
         "Q00": 0.1,
         "Q_up": 2.0,
         "Z_down": 0.9,
         "gate_specs": gate_specs,
+        # "channel_length": channel_length,
     }
 
 
@@ -525,7 +533,7 @@ def _extract_gate_section_state(x, z_values, q_values, gate_specs):
     )
 
 
-def hydraulic_simulator(e, previous_state=None, use_z00=False):
+def hydraulic_simulator(e, previous_state=None, use_h00=False):
     """
     Run one hydraulic simulation period.
 
@@ -535,8 +543,8 @@ def hydraulic_simulator(e, previous_state=None, use_z00=False):
         Gate openings for each canal gate.
     previous_state : dict | None
         Previous terminal state with keys "Z" and "Q". Used when not on the first step.
-    use_z00 : bool
-        When True, use the default Z00/Q00 initial conditions for the first step.
+    use_h00 : bool
+        When True, use the default h00/Q00 initial conditions for the first step.
 
     Returns
     -------
@@ -568,8 +576,12 @@ def hydraulic_simulator(e, previous_state=None, use_z00=False):
 
     n_section = len(x)
 
-    if use_z00 or previous_state is None:
-        Z0 = _build_initial_profile(context["Z00"], n_section)
+    if use_h00 or previous_state is None:
+        channel_length = float(np.max(x))
+        Z00 = context["h00"] + ((channel_length - x)*CHANNEL_SLOPE)
+        Z0 = np.array(Z00)
+        # h = Z - ((channel_length - self.x)*slop)
+        # Z0 = _build_initial_profile(Z00, n_section)
         Q0 = _build_initial_profile(context["Q00"], n_section)
     else:
         Z0 = np.asarray(previous_state["Z"], dtype=np.float32).copy()
@@ -601,12 +613,13 @@ def hydraulic_simulator(e, previous_state=None, use_z00=False):
     gate_z, gate_q = _extract_gate_section_state(x, Z_res, Q_res, gate_specs)
 
     final_state = {
+        "h": np.asarray(Z_res, dtype=np.float32) - np.asarray((float(np.max(x)) - x) * CHANNEL_SLOPE, dtype=np.float32),
         "Z": np.asarray(Z_res, dtype=np.float32),
         "Q": np.asarray(Q_res, dtype=np.float32),
         "gate_Z": gate_z,
         "gate_Q": gate_q,
         "Qf": water_volume.copy(),
-        "Z_max_over_time": np.asarray(safety_trace["Z_max_over_time"], dtype=np.float32),
+        "h_max_over_time": np.asarray(safety_trace["h_max_over_time"], dtype=np.float32),
         "Q_max_over_time": np.asarray(safety_trace["Q_max_over_time"], dtype=np.float32),
         "Qf_max_over_time": np.asarray(safety_trace["Qf_max_over_time"], dtype=np.float32),
         "elapsed_seconds": float(t_ed - t_st),

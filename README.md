@@ -155,7 +155,7 @@ Safety example:
 ```python
 config = WaterAllocationConfig(
     num_channels=3,
-    safe_z_max=1.2,
+    safe_h_max=1.2,
     safe_q_max=3.0,
     safe_qf_max=np.array([2000.0, 1800.0, 1500.0], dtype=np.float32),
     safety_penalty=5.0,
