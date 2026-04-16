@@ -243,14 +243,16 @@ class SaintVenantSolver:
                     sigma_s = self.sub_channel[j][0]
                     b = self.sub_channel[j][1]
                     e = self.sub_channel[j][2]
-                    Zd = self.sub_channel[j][3]
+                    # Zd = self.sub_channel[j][3]
 
                     A_coe = -sigma_s*b*e
+                    Zd = self.Zd[j]
                     delta_Z = self.Z[j] - Zd
 
                     
 
-                    Qf = A_coe * np.sqrt(2.0*self.g*(self.Z[j]))
+                    # Qf = A_coe * np.sqrt(2.0*self.g*(self.Z[j]))
+                    Qf = A_coe * np.sqrt(2.0*self.g*(delta_Z))
                     p2 = -self.g*A_coe*np.sqrt(2.0*self.g*delta_Z)*self.Z[j]
                     v2 = -self.g*A_coe*np.sqrt(2.0*self.g*delta_Z)
                     
@@ -502,10 +504,10 @@ def _build_default_context():
     return {
         "x": x,
         "t": t,
-        "h00": 0.9,
+        "h00": 1.0,
         "Q00": 0.1,
-        "Q_up": 2.0,
-        "Z_down": 0.9,
+        "Q_up": 3.0,
+        "Z_down": 1.0,
         "gate_specs": gate_specs,
         # "channel_length": channel_length,
     }
