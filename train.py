@@ -601,7 +601,9 @@ def main() -> None:
                 f"avg_reward={avg_reward:.4f} "
                 f"avg_unmet_ratio={avg_unmet:.4f} "
                 f"policy_loss={stats['policy_loss']:.4f} "
-                f"value_loss={stats['value_loss']:.4f}"
+                f"value_loss={stats['value_loss']:.4f} "
+                f"valid_step_ratio={rollout_metrics['valid_step_ratio']:.4f} "
+                f"valid_episode_ratio={rollout_metrics['valid_episode_ratio']:.4f}"
             )
         with log_path.open("a", encoding="utf-8") as log_file:
             log_record = _build_detailed_log_record(

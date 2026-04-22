@@ -161,7 +161,8 @@ class SaintVenantSolver:
             A_coe = sigma_s*b*e
             z = self.Z[indices[ii]] - self.Zd[indices[ii]]
 
-            qf = A_coe * np.sqrt(2.0*self.g*(z))
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                qf = A_coe * np.sqrt(2.0 * self.g * z)
             (self.Qf).append(qf)
             
 
@@ -177,9 +178,11 @@ class SaintVenantSolver:
         P = d + 2.0*h/np.cos(camber)
         self.A = (self.B + d)*h/2.0
         self.R = self.A / P
-        self.u = Q/self.A
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            self.u = Q / self.A
         self.q = q
-        self.C = 1.0/self.n * np.power(self.R, 1/6)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            self.C = 1.0 / self.n * np.power(self.R, 1 / 6)
 
     def get_discrete_coeffs(self, j):
         """
