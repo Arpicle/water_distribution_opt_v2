@@ -492,9 +492,9 @@ def main() -> None:
     parser.add_argument("--eval-log-file", type=str, default="evaluation_details.jsonl", help="Detailed evaluation log file")
     parser.add_argument("--output-dir", type=str, default="runs", help="Directory for timestamped training outputs")
     parser.add_argument("--resume", type=str, default="", help="Resume from model .pt or checkpoint .pt")
-    parser.add_argument("--checkpoint-interval", type=int, default=5, help="Save a named checkpoint every N iterations")
-    parser.add_argument("--eval-interval", type=int, default=5, help="Run evaluation every N iterations")
-    parser.add_argument("--eval-episodes", type=int, default=5, help="Evaluation episodes per run")
+    parser.add_argument("--checkpoint-interval", type=int, default=10, help="Save a named checkpoint every N iterations")
+    parser.add_argument("--eval-interval", type=int, default=10, help="Run evaluation every N iterations")
+    parser.add_argument("--eval-episodes", type=int, default=10, help="Evaluation episodes per run")
     args = parser.parse_args()
 
     env_config = build_env_config(args.num_channels)

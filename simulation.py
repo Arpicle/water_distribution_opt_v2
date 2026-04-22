@@ -359,8 +359,8 @@ class SaintVenantSolver:
 
         for _ in range(iterations):
 
-            Z_rec = self.Z_next.copy()
-            Q_rec = self.Q_next.copy()
+            # Z_rec = self.Z_next.copy()
+            # Q_rec = self.Q_next.copy()
             
             self.set_coefficients(self.Z_next, self.Q_next, self.q)
             self.forward_sweep(up)
@@ -373,8 +373,8 @@ class SaintVenantSolver:
             # 更新 n+1 时刻值用于下一轮迭代修正系数
             # 在实际工程中，此处会重新计算面积、摩阻等 
 
-            Z_err = np.sum(self.Z_next - Z_rec)**2/len(Z_rec)
-            Q_err = np.sum(self.Q_next - Q_rec)**2/len(Q_rec)
+            # Z_err = np.sum(self.Z_next - Z_rec)**2/len(Z_rec)
+            # Q_err = np.sum(self.Q_next - Q_rec)**2/len(Q_rec)
 
             # print("=====")
             # print("Z MSE: {0}".format(Z_err))
