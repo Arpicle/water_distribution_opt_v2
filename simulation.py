@@ -616,13 +616,14 @@ def hydraulic_simulator(e, previous_state=None, use_h00=False, q_up=None):
     t_ed = time.time()
 
     combined = np.array(Qf, dtype=np.float32)
-    if combined.size == 0:
+    if combined.size == 0 or bool(safety_trace.get("has_nan", False)):
         water_volume = np.zeros(len(gate_openings), dtype=np.float32)
     else:
         Qf_res = combined.transpose()
+        time_used = np.asarray(t[: combined.shape[0]], dtype=np.float32)
         water_volume = []
         for ii in range(len(Qf_res)):
-            water_volume.append(np.trapezoid(Qf_res[ii], x=t))
+            water_volume.append(np.trapezoid(Qf_res[ii], x=time_used))
         water_volume = np.asarray(water_volume, dtype=np.float32)
     gate_z, gate_q = _extract_gate_section_state(x, Z_res, Q_res, gate_specs)
 

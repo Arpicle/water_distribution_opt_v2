@@ -24,6 +24,8 @@ def _init_rollout_metrics() -> dict:
         "oversupply_ratio_sum": 0.0,
         "smoothness_cost_sum": 0.0,
         "q_up_sum": 0.0,
+        "valid_step_count": 0,
+        "valid_episode_count": 0,
         "unmet_penalty_sum": 0.0,
         "oversupply_penalty_sum": 0.0,
         "smoothness_penalty_sum": 0.0,
@@ -43,6 +45,7 @@ def _update_rollout_metrics(metrics: dict, reward: float, info: dict) -> None:
     metrics["oversupply_ratio_sum"] += float(info["oversupply_ratio"])
     metrics["smoothness_cost_sum"] += float(info["smoothness_cost"])
     metrics["q_up_sum"] += float(info["q_up"])
+    metrics["valid_step_count"] += int(not bool(info.get("simulation_failed", False)))
     metrics["unmet_penalty_sum"] += float(info["unmet_penalty"])
     metrics["oversupply_penalty_sum"] += float(info["oversupply_penalty_value"])
     metrics["smoothness_penalty_sum"] += float(info["smoothness_penalty_value"])
@@ -62,6 +65,8 @@ def _finalize_rollout_metrics(metrics: dict) -> dict:
         "avg_oversupply_ratio": metrics["oversupply_ratio_sum"] / step_count,
         "avg_smoothness_cost": metrics["smoothness_cost_sum"] / step_count,
         "avg_q_up": metrics["q_up_sum"] / step_count,
+        "valid_step_ratio": metrics["valid_step_count"] / step_count,
+        "valid_episode_ratio": metrics["valid_episode_count"] / episode_count,
         "avg_unmet_penalty": metrics["unmet_penalty_sum"] / step_count,
         "avg_oversupply_penalty": metrics["oversupply_penalty_sum"] / step_count,
         "avg_smoothness_penalty": metrics["smoothness_penalty_sum"] / step_count,
@@ -91,6 +96,8 @@ def _build_detailed_log_record(
             "early_finished_rate": rollout_metrics["early_finished_rate"],
             "all_satisfied_rate": rollout_metrics["all_satisfied_rate"],
             "avg_q_up": rollout_metrics["avg_q_up"],
+            "valid_step_ratio": rollout_metrics["valid_step_ratio"],
+            "valid_episode_ratio": rollout_metrics["valid_episode_ratio"],
         },
         "reward_parts": {
             "avg_step_reward": rollout_metrics["avg_step_reward"],
@@ -104,6 +111,8 @@ def _build_detailed_log_record(
             "oversupply_ratio": rollout_metrics["avg_oversupply_ratio"],
             "smoothness_cost": rollout_metrics["avg_smoothness_cost"],
             "q_up": rollout_metrics["avg_q_up"],
+            "valid_step_ratio": rollout_metrics["valid_step_ratio"],
+            "valid_episode_ratio": rollout_metrics["valid_episode_ratio"],
             "steps": rollout_metrics["step_count"],
             "episodes": rollout_metrics["episode_count"],
         },
@@ -225,6 +234,7 @@ def _run_rollout_worker(
         ep_reward = 0.0
         ep_unmet = []
         ep_steps = 0
+        episode_valid = True
 
         while not done:
             obs_t = torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0)
@@ -250,6 +260,7 @@ def _run_rollout_worker(
             ep_reward += reward
             ep_unmet.append(info["unmet_ratio"])
             ep_steps += 1
+            episode_valid = episode_valid and (not bool(info.get("simulation_failed", False)))
             _update_rollout_metrics(metrics, reward, info)
             obs = next_obs
 
@@ -257,6 +268,7 @@ def _run_rollout_worker(
         unmet_ratios.append(float(np.mean(ep_unmet)))
         metrics["episode_length_sum"] += ep_steps
         metrics["episode_count"] += 1
+        metrics["valid_episode_count"] += int(episode_valid)
 
     return {
         "trajectories": trajectories,
@@ -312,6 +324,7 @@ def collect_rollouts(
             ep_reward = 0.0
             ep_unmet = []
             ep_steps = 0
+            episode_valid = True
 
             while not done:
                 action, log_prob, value = agent.select_action(obs)
@@ -327,6 +340,7 @@ def collect_rollouts(
                 ep_reward += reward
                 ep_unmet.append(info["unmet_ratio"])
                 ep_steps += 1
+                episode_valid = episode_valid and (not bool(info.get("simulation_failed", False)))
                 _update_rollout_metrics(metrics, reward, info)
                 obs = next_obs
 
@@ -334,6 +348,7 @@ def collect_rollouts(
             unmet_ratios.append(float(np.mean(ep_unmet)))
             metrics["episode_length_sum"] += ep_steps
             metrics["episode_count"] += 1
+            metrics["valid_episode_count"] += int(episode_valid)
 
         return (
             buffer,
@@ -381,6 +396,8 @@ def build_env_config(num_channels: int) -> WaterAllocationConfig:
         horizon=5,
         gate_open_min=0.0,
         gate_open_max=0.35,
+        q_up_min=1.0,
+        q_up_max=3.5,
         demand_low=5000,
         demand_high=40000,
         demand_noise_std=3.0,
@@ -392,6 +409,8 @@ def build_env_config(num_channels: int) -> WaterAllocationConfig:
         safe_q_max=3.5,
         safe_qf_max=np.array([1.0, 1.2, 1.1], dtype=np.float32),
         safety_penalty=5.0,
+        early_completion_bonus=1.0,
+        nan_penalty=1e6,
     )
 
 
@@ -553,8 +572,8 @@ def main() -> None:
 
     for iteration in range(start_iteration, args.train_iterations + 1):
 
-        print("=====start")
-        t1 = time.time()
+        # print("=====start")
+        # t1 = time.time()
         buffer, avg_reward, avg_unmet, rollout_metrics = collect_rollouts(
             env,
             agent,
@@ -563,18 +582,18 @@ def main() -> None:
             base_seed=iteration * 1000,
         )
 
-        t2 = time.time()
-        print(t2-t1)
-        print("=====update")
+        # t2 = time.time()
+        # print(t2-t1)
+        # print("=====update")
         
         
         stats = agent.update(buffer)
 
         
 
-        t3 = time.time()
-        print(t3-t2)
-        print("=====log")
+        # t3 = time.time()
+        # print(t3-t2)
+        # print("=====log")
 
         if iteration % 1 == 0 or iteration == 1:
             print(
