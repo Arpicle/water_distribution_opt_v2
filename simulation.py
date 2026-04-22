@@ -449,11 +449,22 @@ def sim_run(Z0, Q0, Q_up, Z_down, x, t, sub_channel, par_sc):
     h_max_over_time = np.full(len(x), -np.inf, dtype=np.float32)
     q_max_over_time = np.full(len(x), -np.inf, dtype=np.float32)
     qf_max_over_time = None
+    has_nan = False
+    Z_res = np.asarray(Z0, dtype=np.float32).copy()
+    Q_res = np.asarray(Q0, dtype=np.float32).copy()
 
     for ii, tt in enumerate(t):
         up_boundary = Q_up
         down_boundary = Z_down
         h, Z_res, Q_res, Qf_res = solver.solve_one_step(up_boundary, down_boundary, 3)
+        if (
+            np.isnan(np.asarray(h, dtype=np.float32)).any()
+            or np.isnan(np.asarray(Z_res, dtype=np.float32)).any()
+            or np.isnan(np.asarray(Q_res, dtype=np.float32)).any()
+            or np.isnan(np.asarray(Qf_res, dtype=np.float32)).any()
+        ):
+            has_nan = True
+            break
         h_max_over_time = np.maximum(h_max_over_time, np.asarray(h, dtype=np.float32))
         q_max_over_time = np.maximum(q_max_over_time, np.asarray(Q_res, dtype=np.float32))
         qf_array = np.asarray(Qf_res, dtype=np.float32)
@@ -476,6 +487,7 @@ def sim_run(Z0, Q0, Q_up, Z_down, x, t, sub_channel, par_sc):
         "h_max_over_time": h_max_over_time,
         "Q_max_over_time": q_max_over_time,
         "Qf_max_over_time": qf_max_over_time,
+        "has_nan": has_nan,
     }
 
     return Z_evl, Q_evl, Qf, Z_res, Q_res, safety_trace
@@ -535,7 +547,7 @@ def _extract_gate_section_state(x, z_values, q_values, gate_specs):
     )
 
 
-def hydraulic_simulator(e, previous_state=None, use_h00=False):
+def hydraulic_simulator(e, previous_state=None, use_h00=False, q_up=None):
     """
     Run one hydraulic simulation period.
 
@@ -594,7 +606,7 @@ def hydraulic_simulator(e, previous_state=None, use_h00=False):
                 f"expected {(n_section,)}, got Z={Z0.shape}, Q={Q0.shape}."
             )
 
-    Q_up = context["Q_up"]
+    Q_up = context["Q_up"] if q_up is None else float(q_up)
     Z_down = context["Z_down"]
 
     t_st = time.time()
@@ -624,6 +636,8 @@ def hydraulic_simulator(e, previous_state=None, use_h00=False):
         "h_max_over_time": np.asarray(safety_trace["h_max_over_time"], dtype=np.float32),
         "Q_max_over_time": np.asarray(safety_trace["Q_max_over_time"], dtype=np.float32),
         "Qf_max_over_time": np.asarray(safety_trace["Qf_max_over_time"], dtype=np.float32),
+        "Q_up": Q_up,
+        "has_nan": bool(safety_trace.get("has_nan", False)),
         "elapsed_seconds": float(t_ed - t_st),
     }
     return water_volume, final_state

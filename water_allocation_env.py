@@ -17,6 +17,8 @@ class WaterAllocationConfig:
     horizon: int = 5
     gate_open_min: float = 0.03
     gate_open_max: float = 0.5
+    q_up_min: float = 1.0
+    q_up_max: float = 3.5
     max_flow_per_channel: float = 40.0
     demand_low: float = 5000.0
     demand_high: float = 40000.0
@@ -30,6 +32,7 @@ class WaterAllocationConfig:
     safe_qf_max: float | np.ndarray | None = None
     safety_penalty: float = 5.0
     early_completion_bonus: float = 1.0
+    nan_penalty: float = 1e6
 
 
 class WaterAllocationEnv:
@@ -37,7 +40,7 @@ class WaterAllocationEnv:
     5-step water allocation environment.
 
     State:
-        [current_demands(N), previous_gate_openings(N), gate_Z(N), gate_Q(N), current_step_ratio(1)]
+        [current_demands(N), previous_gate_openings(N), gate_Z(N), gate_Q(N), current_step_ratio(1), q_up_ratio(1)]
 
     Action:
         gate openings for the next period, each in [0, 1].
@@ -56,6 +59,8 @@ class WaterAllocationEnv:
         )
         if config.gate_open_min > config.gate_open_max:
             raise ValueError("gate_open_min must be less than or equal to gate_open_max.")
+        if config.q_up_min > config.q_up_max:
+            raise ValueError("q_up_min must be less than or equal to q_up_max.")
         self.channel_weights = self._build_channel_weights(config.channel_weights)
         self.hydraulic_simulator = hydraulic_simulator or self.default_hydraulic_simulator
         if self.hydraulic_simulator is hydraulic_simulator and self.num_channels != 3:
@@ -67,11 +72,12 @@ class WaterAllocationEnv:
         self.current_step = 0
         self.current_demands = np.zeros(self.num_channels, dtype=np.float32)
         self.previous_action = np.zeros(self.num_channels, dtype=np.float32)
+        self.current_q_up = float(config.q_up_min)
         self.hydraulic_state = None
 
     @property
     def obs_dim(self) -> int:
-        return self.num_channels * 4 + 1
+        return self.num_channels * 4 + 2
 
     @property
     def action_dim(self) -> int:
@@ -84,6 +90,9 @@ class WaterAllocationEnv:
         self.current_step = 0
         self.previous_action = np.zeros(self.num_channels, dtype=np.float32)
         self.current_demands = self._sample_initial_demand()
+        self.current_q_up = float(
+            np.random.uniform(self.config.q_up_min, self.config.q_up_max)
+        )
         self.hydraulic_state = None
         return self._get_obs()
 
@@ -91,9 +100,42 @@ class WaterAllocationEnv:
         normalized_action = np.asarray(action, dtype=np.float32)
         normalized_action = np.clip(normalized_action, 0.0, 1.0)
         gate_action = self._scale_action_to_gate_range(normalized_action)
+        smoothness_cost = float(np.mean(np.abs(gate_action - self.previous_action)))
 
         requested_supply = gate_action * self.channel_capacity
         actual_supply = self.simulate_supply(gate_action)
+        simulation_failed = bool(
+            isinstance(self.hydraulic_state, dict) and self.hydraulic_state.get("has_nan", False)
+        )
+
+        if simulation_failed:
+            self.previous_action = gate_action.copy()
+            self.current_step += 1
+            done = True
+            info = {
+                "normalized_action": normalized_action,
+                "gate_action": gate_action,
+                "requested_supply": requested_supply,
+                "actual_supply": np.zeros(self.num_channels, dtype=np.float32),
+                "unmet_demand": self.current_demands.copy(),
+                "oversupply": np.zeros(self.num_channels, dtype=np.float32),
+                "channel_weights": self.channel_weights.copy(),
+                "unmet_ratio": 1.0,
+                "oversupply_ratio": 0.0,
+                "smoothness_cost": smoothness_cost,
+                "unmet_penalty": 1.0,
+                "oversupply_penalty_value": 0.0,
+                "smoothness_penalty_value": 0.0,
+                "safety_violation": {"h": 0.0, "q": 0.0, "qf": 0.0},
+                "safety_penalty": 0.0,
+                "completion_bonus": 0.0,
+                "early_finished": False,
+                "all_demands_satisfied": False,
+                "q_up": self.current_q_up,
+                "simulation_failed": True,
+                "nan_penalty": self.config.nan_penalty,
+            }
+            return self._get_obs(), float(-self.config.nan_penalty), done, info
 
         unmet_demand = np.maximum(self.current_demands - actual_supply, 0.0)
         oversupply = np.maximum(actual_supply - self.current_demands, 0.0)
@@ -104,7 +146,6 @@ class WaterAllocationEnv:
 
         unmet_ratio = weighted_unmet.sum() / (weighted_demand.sum() + 1e-6)
         oversupply_ratio = weighted_oversupply.sum() / (weighted_demand.sum() + 1e-6)
-        smoothness_cost = float(np.mean(np.abs(gate_action - self.previous_action)))
         safety_violation, safety_penalty_value = self._compute_safety_penalty()
 
         reward = (
@@ -156,6 +197,9 @@ class WaterAllocationEnv:
             "completion_bonus": completion_bonus,
             "early_finished": early_finished,
             "all_demands_satisfied": bool(all_demands_satisfied),
+            "q_up": self.current_q_up,
+            "simulation_failed": False,
+            "nan_penalty": 0.0,
         }
 
         if not done:
@@ -180,6 +224,7 @@ class WaterAllocationEnv:
                 gate_openings.astype(np.float32),
                 previous_state=self.hydraulic_state,
                 use_h00=self.current_step == 0,
+                q_up=float(self.current_q_up),
             )
         else:
             result = self.hydraulic_simulator(gate_openings.astype(np.float32))
@@ -191,6 +236,13 @@ class WaterAllocationEnv:
             supply = result
 
         supply = np.asarray(supply, dtype=np.float32)
+        if np.isnan(supply).any():
+            self.hydraulic_state = {
+                "has_nan": True,
+                "gate_Z": np.zeros(self.num_channels, dtype=np.float32),
+                "gate_Q": np.zeros(self.num_channels, dtype=np.float32),
+            }
+            return np.zeros(self.num_channels, dtype=np.float32)
 
         if supply.shape != (self.num_channels,):
             raise ValueError(
@@ -300,12 +352,20 @@ class WaterAllocationEnv:
             [self.current_step / max(self.horizon, 1)],
             dtype=np.float32,
         )
+        q_up_ratio = np.array(
+            [
+                (self.current_q_up - self.config.q_up_min)
+                / max(self.config.q_up_max - self.config.q_up_min, 1e-6)
+            ],
+            dtype=np.float32,
+        )
         obs_parts = [
             self.current_demands / demand_scale,
             self.previous_action,
             gate_z,
             gate_q,
             step_ratio,
+            q_up_ratio,
         ]
         obs = np.concatenate(obs_parts)
         return obs.astype(np.float32)

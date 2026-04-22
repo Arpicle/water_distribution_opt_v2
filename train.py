@@ -23,6 +23,7 @@ def _init_rollout_metrics() -> dict:
         "unmet_ratio_sum": 0.0,
         "oversupply_ratio_sum": 0.0,
         "smoothness_cost_sum": 0.0,
+        "q_up_sum": 0.0,
         "unmet_penalty_sum": 0.0,
         "oversupply_penalty_sum": 0.0,
         "smoothness_penalty_sum": 0.0,
@@ -41,6 +42,7 @@ def _update_rollout_metrics(metrics: dict, reward: float, info: dict) -> None:
     metrics["unmet_ratio_sum"] += float(info["unmet_ratio"])
     metrics["oversupply_ratio_sum"] += float(info["oversupply_ratio"])
     metrics["smoothness_cost_sum"] += float(info["smoothness_cost"])
+    metrics["q_up_sum"] += float(info["q_up"])
     metrics["unmet_penalty_sum"] += float(info["unmet_penalty"])
     metrics["oversupply_penalty_sum"] += float(info["oversupply_penalty_value"])
     metrics["smoothness_penalty_sum"] += float(info["smoothness_penalty_value"])
@@ -59,6 +61,7 @@ def _finalize_rollout_metrics(metrics: dict) -> dict:
         "avg_unmet_ratio": metrics["unmet_ratio_sum"] / step_count,
         "avg_oversupply_ratio": metrics["oversupply_ratio_sum"] / step_count,
         "avg_smoothness_cost": metrics["smoothness_cost_sum"] / step_count,
+        "avg_q_up": metrics["q_up_sum"] / step_count,
         "avg_unmet_penalty": metrics["unmet_penalty_sum"] / step_count,
         "avg_oversupply_penalty": metrics["oversupply_penalty_sum"] / step_count,
         "avg_smoothness_penalty": metrics["smoothness_penalty_sum"] / step_count,
@@ -87,6 +90,7 @@ def _build_detailed_log_record(
             "avg_episode_length": rollout_metrics["avg_episode_length"],
             "early_finished_rate": rollout_metrics["early_finished_rate"],
             "all_satisfied_rate": rollout_metrics["all_satisfied_rate"],
+            "avg_q_up": rollout_metrics["avg_q_up"],
         },
         "reward_parts": {
             "avg_step_reward": rollout_metrics["avg_step_reward"],
@@ -99,6 +103,7 @@ def _build_detailed_log_record(
         "rollout_parts": {
             "oversupply_ratio": rollout_metrics["avg_oversupply_ratio"],
             "smoothness_cost": rollout_metrics["avg_smoothness_cost"],
+            "q_up": rollout_metrics["avg_q_up"],
             "steps": rollout_metrics["step_count"],
             "episodes": rollout_metrics["episode_count"],
         },
@@ -404,6 +409,7 @@ def evaluate_policy(
     total_rewards = []
     total_unmet_ratios = []
     total_lengths = []
+    total_q_ups = []
     early_finished_count = 0
     all_satisfied_count = 0
 
@@ -416,6 +422,7 @@ def evaluate_policy(
         episode_steps = []
         episode_early_finished = False
         episode_all_satisfied = False
+        episode_q_up = float(env.current_q_up)
         while not done:
             current_demand = env.current_demands.copy()
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=agent.device).unsqueeze(0)
@@ -440,12 +447,14 @@ def evaluate_policy(
                     "smoothness_cost": float(info["smoothness_cost"]),
                     "safety_penalty": float(info["safety_penalty"]),
                     "completion_bonus": float(info["completion_bonus"]),
+                    "q_up": float(info["q_up"]),
                 }
             )
             if verbose:
                 print(
                     f"episode={episode + 1}, step={step_id + 1}, "
                     f"demand={np.round(current_demand, 2)}, "
+                    f"Q_up={info['q_up']:.3f}, "
                     f"gate={np.round(info['gate_action'], 3)}, "
                     f"supply={np.round(info['actual_supply'], 2)}, "
                     f"unmet={np.round(info['unmet_demand'], 2)}"
@@ -454,11 +463,13 @@ def evaluate_policy(
         total_rewards.append(total_reward)
         total_unmet_ratios.append(float(np.mean(unmet_ratios)) if unmet_ratios else 0.0)
         total_lengths.append(step_id)
+        total_q_ups.append(episode_q_up)
         early_finished_count += float(episode_early_finished)
         all_satisfied_count += float(episode_all_satisfied)
         episode_records.append(
             {
                 "episode": episode + 1,
+                "q_up": episode_q_up,
                 "total_reward": float(total_reward),
                 "avg_unmet_ratio": float(np.mean(unmet_ratios)) if unmet_ratios else 0.0,
                 "length": step_id,
@@ -475,6 +486,7 @@ def evaluate_policy(
         "avg_reward": float(np.mean(total_rewards)) if total_rewards else 0.0,
         "avg_unmet_ratio": float(np.mean(total_unmet_ratios)) if total_unmet_ratios else 0.0,
         "avg_episode_length": float(np.mean(total_lengths)) if total_lengths else 0.0,
+        "avg_q_up": float(np.mean(total_q_ups)) if total_q_ups else 0.0,
         "early_finished_rate": early_finished_count / max(episodes, 1),
         "all_satisfied_rate": all_satisfied_count / max(episodes, 1),
         "episode_results": episode_records,
@@ -600,6 +612,7 @@ def main() -> None:
                     "avg_reward": eval_results["avg_reward"],
                     "avg_unmet_ratio": eval_results["avg_unmet_ratio"],
                     "avg_episode_length": eval_results["avg_episode_length"],
+                    "avg_q_up": eval_results["avg_q_up"],
                     "early_finished_rate": eval_results["early_finished_rate"],
                     "all_satisfied_rate": eval_results["all_satisfied_rate"],
                 },
@@ -635,6 +648,7 @@ def main() -> None:
             "avg_reward": final_eval["avg_reward"],
             "avg_unmet_ratio": final_eval["avg_unmet_ratio"],
             "avg_episode_length": final_eval["avg_episode_length"],
+            "avg_q_up": final_eval["avg_q_up"],
             "early_finished_rate": final_eval["early_finished_rate"],
             "all_satisfied_rate": final_eval["all_satisfied_rate"],
         },
