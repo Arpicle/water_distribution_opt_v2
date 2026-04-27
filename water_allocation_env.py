@@ -5,7 +5,7 @@ from typing import Callable, Dict, Tuple
 
 import numpy as np
 
-from simulation import hydraulic_simulator
+from simulation import get_initial_gate_state, hydraulic_simulator
 
 
 HydraulicSimulator = Callable[[np.ndarray], np.ndarray]
@@ -37,7 +37,7 @@ class WaterAllocationEnv:
     5-step water allocation environment.
 
     State:
-        [current_demands(N), previous_gate_openings(N), gate_Z(N), gate_Q(N), current_step_ratio(1)]
+        [current_demands(N), masked Z/Q/e history(3 * horizon * N), current_step_ratio(1)]
 
     Action:
         gate openings for the next period, each in [0, 1].
@@ -67,11 +67,14 @@ class WaterAllocationEnv:
         self.current_step = 0
         self.current_demands = np.zeros(self.num_channels, dtype=np.float32)
         self.previous_action = np.zeros(self.num_channels, dtype=np.float32)
+        self.z_history = np.zeros((self.horizon, self.num_channels), dtype=np.float32)
+        self.q_history = np.zeros((self.horizon, self.num_channels), dtype=np.float32)
+        self.e_history = np.zeros((self.horizon, self.num_channels), dtype=np.float32)
         self.hydraulic_state = None
 
     @property
     def obs_dim(self) -> int:
-        return self.num_channels * 4 + 1
+        return self.num_channels + self.horizon * self.num_channels * 3 + 1
 
     @property
     def action_dim(self) -> int:
@@ -84,7 +87,13 @@ class WaterAllocationEnv:
         self.current_step = 0
         self.previous_action = np.zeros(self.num_channels, dtype=np.float32)
         self.current_demands = self._sample_initial_demand()
+        self.z_history.fill(0.0)
+        self.q_history.fill(0.0)
+        self.e_history.fill(0.0)
         self.hydraulic_state = None
+        if self.hydraulic_simulator is hydraulic_simulator:
+            gate_z, gate_q = get_initial_gate_state()
+            self.hydraulic_state = {"gate_Z": gate_z, "gate_Q": gate_q}
         return self._get_obs()
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, Dict]:
@@ -295,20 +304,53 @@ class WaterAllocationEnv:
 
     def _get_obs(self) -> np.ndarray:
         demand_scale = max(self.config.demand_high, 1.0)
-        gate_z, gate_q = self._get_gate_hydraulic_features()
+        self._update_state_history()
+        history_features = self._get_masked_history_features()
         step_ratio = np.array(
             [self.current_step / max(self.horizon, 1)],
             dtype=np.float32,
         )
         obs_parts = [
             self.current_demands / demand_scale,
-            self.previous_action,
-            gate_z,
-            gate_q,
+            history_features,
             step_ratio,
         ]
         obs = np.concatenate(obs_parts)
         return obs.astype(np.float32)
+
+    def _update_state_history(self) -> None:
+        history_idx = min(max(self.current_step, 0), self.horizon - 1)
+        gate_z, gate_q = self._get_gate_hydraulic_features()
+        self.z_history[history_idx] = gate_z
+        self.q_history[history_idx] = gate_q
+        self.e_history[history_idx] = self.previous_action
+
+    def _get_masked_history_features(self) -> np.ndarray:
+        mask = self._build_history_mask()
+        z_features = self.z_history.reshape(-1) * mask
+        q_features = self.q_history.reshape(-1) * mask
+        e_features = self.e_history.reshape(-1) * mask
+        return np.concatenate([z_features, q_features, e_features]).astype(np.float32)
+
+    def _build_history_mask(self) -> np.ndarray:
+        if self.horizon != 5 or self.num_channels != 3:
+            mask = np.zeros((self.horizon, self.num_channels), dtype=np.float32)
+            history_idx = min(max(self.current_step, 0), self.horizon - 1)
+            mask[history_idx] = 1.0
+            return mask.reshape(-1)
+
+        masks = np.array(
+            [
+                [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+                [1, 1, 1, 0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0],
+                [1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 1, 1, 1],
+            ],
+            dtype=np.float32,
+        )
+        history_idx = min(max(self.current_step, 0), self.horizon - 1)
+        return masks[history_idx]
 
     def _get_gate_hydraulic_features(self) -> tuple[np.ndarray, np.ndarray]:
         if not isinstance(self.hydraulic_state, dict):

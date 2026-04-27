@@ -535,6 +535,25 @@ def _extract_gate_section_state(x, z_values, q_values, gate_specs):
     )
 
 
+def get_initial_gate_state():
+    context = _build_default_context()
+    x = context["x"]
+    gate_specs = context["gate_specs"]
+    sub_channel = []
+    for position, params in gate_specs:
+        sigma_s, b, _, zd = params
+        sub_channel.append([position, [sigma_s, b, 0.0, zd]])
+
+    if len(sub_channel) != 0:
+        x, _ = make_x_array(x, sub_channel)
+        x = np.array(x)
+
+    channel_length = float(np.max(x))
+    z0 = context["h00"] + ((channel_length - x) * CHANNEL_SLOPE)
+    q0 = _build_initial_profile(context["Q00"], len(x))
+    return _extract_gate_section_state(x, z0, q0, gate_specs)
+
+
 def hydraulic_simulator(e, previous_state=None, use_h00=False):
     """
     Run one hydraulic simulation period.
