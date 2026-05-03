@@ -46,7 +46,7 @@ class PPOConfig:
     update_epochs: int = 5
     minibatch_size: int = 64
     max_grad_norm: float = 0.5
-    hidden_dim: int = 128
+    hidden_dim: int = 256
 
 
 class RolloutBuffer:

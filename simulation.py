@@ -495,7 +495,7 @@ def _build_default_context():
     channel_length = 10000
 
     x = np.array(np.linspace(0, channel_length, n_section))
-    t = np.array(np.linspace(0, 60 * 180, n_time))
+    t = np.array(np.linspace(0, 60 * 5, n_time))
     gate_specs = [
         (2000.5, [0.6, 1.0, 0.0, 0.5]),
         (6000.5, [0.6, 1.5, 0.0, 0.7]),
