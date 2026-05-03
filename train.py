@@ -379,12 +379,12 @@ def build_env_config(num_channels: int) -> WaterAllocationConfig:
         demand_low=5000,
         demand_high=40000,
         demand_noise_std=3.0,
-        smoothness_penalty=0.02,
+        smoothness_penalty=0.3,
         oversupply_penalty=0.7,
-        demand_satisfied_tolerance=1e-3,
+        demand_satisfied_tolerance=1000,
         channel_weights=np.array([1.0, 1.5, 2.0], dtype=np.float32),
-        safe_h_max=3.0,
-        safe_q_max=3.5,
+        safe_h_max=2.0,
+        safe_q_max=3.2,
         safe_qf_max=np.array([1.0, 1.2, 1.1], dtype=np.float32),
         safety_penalty=5.0,
     )
@@ -541,8 +541,8 @@ def main() -> None:
 
     for iteration in range(start_iteration, args.train_iterations + 1):
 
-        print("=====start")
-        t1 = time.time()
+        # print("=====start")
+        # t1 = time.time()
         buffer, avg_reward, avg_unmet, rollout_metrics = collect_rollouts(
             env,
             agent,
@@ -551,18 +551,18 @@ def main() -> None:
             base_seed=iteration * 1000,
         )
 
-        t2 = time.time()
-        print(t2-t1)
-        print("=====update")
+        # t2 = time.time()
+        # print(t2-t1)
+        # print("=====update")
         
         
         stats = agent.update(buffer)
 
         
 
-        t3 = time.time()
-        print(t3-t2)
-        print("=====log")
+        # t3 = time.time()
+        # print(t3-t2)
+        # print("=====log")
 
         if iteration % 1 == 0 or iteration == 1:
             print(

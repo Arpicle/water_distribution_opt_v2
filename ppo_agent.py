@@ -41,12 +41,12 @@ class PPOConfig:
     clip_eps: float = 0.2
     entropy_coef: float = 0.01
     value_coef: float = 0.5
-    learning_rate: float = 3e-4
+    learning_rate: float = 5e-4
     rollout_episodes: int = 64
     update_epochs: int = 5
     minibatch_size: int = 64
     max_grad_norm: float = 0.5
-    hidden_dim: int = 128
+    hidden_dim: int = 256
 
 
 class RolloutBuffer:

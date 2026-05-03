@@ -104,7 +104,10 @@ class WaterAllocationEnv:
 
         unmet_ratio = weighted_unmet.sum() / (weighted_demand.sum() + 1e-6)
         oversupply_ratio = weighted_oversupply.sum() / (weighted_demand.sum() + 1e-6)
-        smoothness_cost = float(np.mean(np.abs(gate_action - self.previous_action)))
+        gate_range = max(self.config.gate_open_max - self.config.gate_open_min, 1e-6)
+        smoothness_cost = float(
+            np.mean(np.abs(gate_action - self.previous_action) / gate_range)
+        )
         safety_violation, safety_penalty_value = self._compute_safety_penalty()
 
         reward = (
@@ -238,13 +241,15 @@ class WaterAllocationEnv:
         if self.config.safe_h_max is not None:
             h_key = "h_max_over_time" if "h_max_over_time" in self.hydraulic_state else "h"
             h_values = np.asarray(self.hydraulic_state[h_key], dtype=np.float32)
-            h_excess = np.maximum(h_values - self.config.safe_h_max, 0.0)
+            h_scale = max(float(self.config.safe_h_max), 1e-6)
+            h_excess = np.maximum(h_values - self.config.safe_h_max, 0.0) / h_scale
             h_violation = float(h_excess.max()) if h_excess.size > 0 else 0.0
 
         if self.config.safe_q_max is not None:
             q_key = "Q_max_over_time" if "Q_max_over_time" in self.hydraulic_state else "Q"
             q_values = np.asarray(self.hydraulic_state[q_key], dtype=np.float32)
-            q_excess = np.maximum(q_values - self.config.safe_q_max, 0.0)
+            q_scale = max(float(self.config.safe_q_max), 1e-6)
+            q_excess = np.maximum(q_values - self.config.safe_q_max, 0.0) / q_scale
             q_violation = float(q_excess.max()) if q_excess.size > 0 else 0.0
 
         if self.config.safe_qf_max is not None:
@@ -257,7 +262,8 @@ class WaterAllocationEnv:
                 raise ValueError(
                     f"safe_qf_max must have shape {(self.num_channels,)}, got {safe_qf.shape}"
                 )
-            qf_excess = np.maximum(qf_values - safe_qf, 0.0)
+            qf_scale = np.maximum(safe_qf, 1e-6)
+            qf_excess = np.maximum(qf_values - safe_qf, 0.0) / qf_scale
             qf_violation = float(qf_excess.max()) if qf_excess.size > 0 else 0.0
 
         total_violation = h_violation + q_violation + qf_violation
