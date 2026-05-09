@@ -387,6 +387,7 @@ def build_env_config(num_channels: int) -> WaterAllocationConfig:
         safe_q_max=3.2,
         safe_qf_max=np.array([1.0, 1.2, 1.1], dtype=np.float32),
         safety_penalty=5.0,
+        early_completion_bonus=1.3,
     )
 
 
