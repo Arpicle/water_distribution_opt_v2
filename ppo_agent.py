@@ -42,6 +42,8 @@ class PPOConfig:
     entropy_coef: float = 0.01
     value_coef: float = 0.5
     learning_rate: float = 5e-4
+    use_lr_decay: bool = True
+    final_learning_rate: float = 0.0
     rollout_episodes: int = 64
     update_epochs: int = 5
     minibatch_size: int = 64

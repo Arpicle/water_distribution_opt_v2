@@ -78,6 +78,7 @@ def _build_detailed_log_record(
     avg_unmet: float,
     rollout_metrics: dict,
     loss_stats: dict,
+    learning_rate: float,
 ) -> dict:
     return {
         "iteration": iteration,
@@ -108,6 +109,9 @@ def _build_detailed_log_record(
             "entropy": loss_stats["entropy"],
             "total_loss": loss_stats["total_loss"],
         },
+        "optimizer": {
+            "learning_rate": learning_rate,
+        },
     }
 
 
@@ -121,6 +125,28 @@ def _to_jsonable(value):
     if isinstance(value, list):
         return [_to_jsonable(item) for item in value]
     return value
+
+
+def _linear_decay_learning_rate(
+    initial_lr: float,
+    final_lr: float,
+    iteration: int,
+    total_iterations: int,
+) -> float:
+    if total_iterations <= 1:
+        return final_lr
+    progress = (iteration - 1) / (total_iterations - 1)
+    progress = min(max(progress, 0.0), 1.0)
+    return initial_lr + progress * (final_lr - initial_lr)
+
+
+def _set_optimizer_learning_rate(agent: PPOAgent, learning_rate: float) -> None:
+    for param_group in agent.optimizer.param_groups:
+        param_group["lr"] = learning_rate
+
+
+def _get_optimizer_learning_rate(agent: PPOAgent) -> float:
+    return float(agent.optimizer.param_groups[0]["lr"])
 
 
 def _create_run_dir(base_dir: Path) -> Path:
@@ -541,6 +567,17 @@ def main() -> None:
     eval_log_path.write_text("", encoding="utf-8")
 
     for iteration in range(start_iteration, args.train_iterations + 1):
+        current_lr = (
+            _linear_decay_learning_rate(
+                initial_lr=ppo_config.learning_rate,
+                final_lr=ppo_config.final_learning_rate,
+                iteration=iteration,
+                total_iterations=args.train_iterations,
+            )
+            if ppo_config.use_lr_decay
+            else ppo_config.learning_rate
+        )
+        _set_optimizer_learning_rate(agent, current_lr)
 
         # print("=====start")
         # t1 = time.time()
@@ -566,20 +603,24 @@ def main() -> None:
         # print("=====log")
 
         if iteration % 1 == 0 or iteration == 1:
+            actual_lr = _get_optimizer_learning_rate(agent)
             print(
                 f"iter={iteration:04d} "
                 f"avg_reward={avg_reward:.4f} "
                 f"avg_unmet_ratio={avg_unmet:.4f} "
                 f"policy_loss={stats['policy_loss']:.4f} "
-                f"value_loss={stats['value_loss']:.4f}"
+                f"value_loss={stats['value_loss']:.4f} "
+                f"lr={actual_lr:.6g}"
             )
         with log_path.open("a", encoding="utf-8") as log_file:
+            actual_lr = _get_optimizer_learning_rate(agent)
             log_record = _build_detailed_log_record(
                     iteration,
                     avg_reward,
                     avg_unmet,
                     rollout_metrics,
                     stats,
+                    actual_lr,
                 )
             log_file.write(
                 json.dumps(_to_jsonable(log_record), ensure_ascii=False) + "\n"
