@@ -78,6 +78,7 @@ def _build_detailed_log_record(
     avg_unmet: float,
     rollout_metrics: dict,
     loss_stats: dict,
+    learning_rate: float,
 ) -> dict:
     return {
         "iteration": iteration,
@@ -108,6 +109,9 @@ def _build_detailed_log_record(
             "entropy": loss_stats["entropy"],
             "total_loss": loss_stats["total_loss"],
         },
+        "optimizer": {
+            "learning_rate": learning_rate,
+        },
     }
 
 
@@ -121,6 +125,28 @@ def _to_jsonable(value):
     if isinstance(value, list):
         return [_to_jsonable(item) for item in value]
     return value
+
+
+def _linear_decay_learning_rate(
+    initial_lr: float,
+    final_lr: float,
+    iteration: int,
+    total_iterations: int,
+) -> float:
+    if total_iterations <= 1:
+        return final_lr
+    progress = (iteration - 1) / (total_iterations - 1)
+    progress = min(max(progress, 0.0), 1.0)
+    return initial_lr + progress * (final_lr - initial_lr)
+
+
+def _set_optimizer_learning_rate(agent: PPOAgent, learning_rate: float) -> None:
+    for param_group in agent.optimizer.param_groups:
+        param_group["lr"] = learning_rate
+
+
+def _get_optimizer_learning_rate(agent: PPOAgent) -> float:
+    return float(agent.optimizer.param_groups[0]["lr"])
 
 
 def _create_run_dir(base_dir: Path) -> Path:
@@ -377,16 +403,16 @@ def build_env_config(num_channels: int) -> WaterAllocationConfig:
         gate_open_min=0.0,
         gate_open_max=0.35,
         demand_low=150,
-        demand_high=1200,
+        demand_high=1500,
         demand_noise_std=3.0,
-        smoothness_penalty=0.02,
+        smoothness_penalty=0.1,
         oversupply_penalty=0.7,
         demand_satisfied_tolerance=30,
         channel_weights=np.array([1.0, 1.5, 2.0], dtype=np.float32),
-        safe_h_max=3.0,
+        safe_h_max=2.0,
         safe_q_max=3.5,
         safe_qf_max=np.array([1.0, 1.2, 1.1], dtype=np.float32),
-        safety_penalty=5.0,
+        safety_penalty=10.0,
     )
 
 
@@ -484,7 +510,7 @@ def evaluate_policy(
 def main() -> None:
     parser = argparse.ArgumentParser(description="PPO for 5-step water allocation")
     parser.add_argument("--num-channels", type=int, default=3, help="Number of channels")
-    parser.add_argument("--train-iterations", type=int, default=20, help="Training rounds")
+    parser.add_argument("--train-iterations", type=int, default=3000, help="Training rounds")
     parser.add_argument("--rollout-episodes", type=int, default=64, help="Episodes per rollout")
     parser.add_argument("--num-workers", type=int, default=12, help="Parallel rollout workers")
     parser.add_argument("--model-path", type=str, default="ppo_water_model.pt", help="Model file")
@@ -492,8 +518,8 @@ def main() -> None:
     parser.add_argument("--eval-log-file", type=str, default="evaluation_details.jsonl", help="Detailed evaluation log file")
     parser.add_argument("--output-dir", type=str, default="runs", help="Directory for timestamped training outputs")
     parser.add_argument("--resume", type=str, default="", help="Resume from model .pt or checkpoint .pt")
-    parser.add_argument("--checkpoint-interval", type=int, default=10, help="Save a named checkpoint every N iterations")
-    parser.add_argument("--eval-interval", type=int, default=10, help="Run evaluation every N iterations")
+    parser.add_argument("--checkpoint-interval", type=int, default=50, help="Save a named checkpoint every N iterations")
+    parser.add_argument("--eval-interval", type=int, default=50, help="Run evaluation every N iterations")
     parser.add_argument("--eval-episodes", type=int, default=10, help="Evaluation episodes per run")
     args = parser.parse_args()
 
@@ -540,9 +566,20 @@ def main() -> None:
     eval_log_path.write_text("", encoding="utf-8")
 
     for iteration in range(start_iteration, args.train_iterations + 1):
+        current_lr = (
+            _linear_decay_learning_rate(
+                initial_lr=ppo_config.learning_rate,
+                final_lr=ppo_config.final_learning_rate,
+                iteration=iteration,
+                total_iterations=args.train_iterations,
+            )
+            if ppo_config.use_lr_decay
+            else ppo_config.learning_rate
+        )
+        _set_optimizer_learning_rate(agent, current_lr)
 
-        print("=====start")
-        t1 = time.time()
+        # print("=====start")
+        # t1 = time.time()
         buffer, avg_reward, avg_unmet, rollout_metrics = collect_rollouts(
             env,
             agent,
@@ -551,34 +588,38 @@ def main() -> None:
             base_seed=iteration * 1000,
         )
 
-        t2 = time.time()
-        print(t2-t1)
-        print("=====update")
+        # t2 = time.time()
+        # print(t2-t1)
+        # print("=====update")
         
         
         stats = agent.update(buffer)
 
         
 
-        t3 = time.time()
-        print(t3-t2)
-        print("=====log")
+        # t3 = time.time()
+        # print(t3-t2)
+        # print("=====log")
 
         if iteration % 1 == 0 or iteration == 1:
+            actual_lr = _get_optimizer_learning_rate(agent)
             print(
                 f"iter={iteration:04d} "
                 f"avg_reward={avg_reward:.4f} "
                 f"avg_unmet_ratio={avg_unmet:.4f} "
                 f"policy_loss={stats['policy_loss']:.4f} "
-                f"value_loss={stats['value_loss']:.4f}"
+                f"value_loss={stats['value_loss']:.4f} "
+                f"lr={actual_lr:.6g}"
             )
         with log_path.open("a", encoding="utf-8") as log_file:
+            actual_lr = _get_optimizer_learning_rate(agent)
             log_record = _build_detailed_log_record(
                     iteration,
                     avg_reward,
                     avg_unmet,
                     rollout_metrics,
                     stats,
+                    actual_lr,
                 )
             log_file.write(
                 json.dumps(_to_jsonable(log_record), ensure_ascii=False) + "\n"
