@@ -43,6 +43,7 @@ class PPOConfig:
     value_coef: float = 0.5
     learning_rate: float = 5e-4
     use_lr_decay: bool = True
+    lr_decay_type: str = "cosine"
     final_learning_rate: float = 0.0
     rollout_episodes: int = 64
     update_epochs: int = 5
