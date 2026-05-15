@@ -74,7 +74,8 @@ class WaterAllocationEnv:
 
     @property
     def obs_dim(self) -> int:
-        return self.num_channels + self.horizon * self.num_channels * 3 + 1
+        history_dim = self.horizon * self.num_channels
+        return self.num_channels + history_dim * 3 + history_dim + 1
 
     @property
     def action_dim(self) -> int:
@@ -311,7 +312,8 @@ class WaterAllocationEnv:
     def _get_obs(self) -> np.ndarray:
         demand_scale = max(self.config.demand_high, 1.0)
         self._update_state_history()
-        history_features = self._get_masked_history_features()
+        history_mask = self._build_history_mask()
+        history_features = self._get_masked_history_features(history_mask)
         step_ratio = np.array(
             [self.current_step / max(self.horizon, 1)],
             dtype=np.float32,
@@ -319,6 +321,7 @@ class WaterAllocationEnv:
         obs_parts = [
             self.current_demands / demand_scale,
             history_features,
+            history_mask,
             step_ratio,
         ]
         obs = np.concatenate(obs_parts)
@@ -331,8 +334,9 @@ class WaterAllocationEnv:
         self.q_history[history_idx] = gate_q
         self.e_history[history_idx] = self.previous_action
 
-    def _get_masked_history_features(self) -> np.ndarray:
-        mask = self._build_history_mask()
+    def _get_masked_history_features(self, mask: np.ndarray | None = None) -> np.ndarray:
+        if mask is None:
+            mask = self._build_history_mask()
         z_features = self.z_history.reshape(-1) * mask
         q_features = self.q_history.reshape(-1) * mask
         e_features = self.e_history.reshape(-1) * mask
