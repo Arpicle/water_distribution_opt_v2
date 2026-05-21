@@ -74,7 +74,7 @@ class WaterAllocationEnv:
 
     @property
     def obs_dim(self) -> int:
-        return self.num_channels * 3 + self.horizon * self.num_channels + 1
+        return self.num_channels * 4 + self.horizon * self.num_channels + 1
 
     @property
     def action_dim(self) -> int:
@@ -130,6 +130,8 @@ class WaterAllocationEnv:
         oversupply_penalty_value = self.config.oversupply_penalty * oversupply_ratio
         smoothness_penalty_value = self.config.smoothness_penalty * smoothness_cost
 
+        action_history_idx = min(max(self.current_step, 0), self.horizon - 1)
+        self.e_history[action_history_idx] = gate_action
         self.previous_action = gate_action.copy()
         self.current_step += 1
         next_demand = self._transition_demand(
@@ -321,6 +323,7 @@ class WaterAllocationEnv:
             self.current_demands / demand_scale,
             gate_z,
             gate_q,
+            self.previous_action,
             history_features,
             step_ratio,
         ]
@@ -332,7 +335,6 @@ class WaterAllocationEnv:
         gate_z, gate_q = self._get_gate_hydraulic_features()
         self.z_history[history_idx] = gate_z
         self.q_history[history_idx] = gate_q
-        self.e_history[history_idx] = self.previous_action
 
     def _get_masked_history_features(self) -> np.ndarray:
         mask = self._build_history_mask()
@@ -356,13 +358,23 @@ class WaterAllocationEnv:
         #     ],
         #     dtype=np.float32,
         # )
+        # masks = np.array(
+        #     [
+        #         [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        #         [0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        #         [1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+        #         [1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0],
+        #         [1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1],
+        #     ],
+        #     dtype=np.float32,
+        # )
         masks = np.array(
             [
-                [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                [0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                [1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
-                [1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0],
-                [1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1],
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0],
+                [1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0],
             ],
             dtype=np.float32,
         )

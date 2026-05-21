@@ -420,7 +420,7 @@ def build_env_config(num_channels: int) -> WaterAllocationConfig:
         demand_satisfied_tolerance=30,
         channel_weights=np.array([1.0, 1.5, 2.0], dtype=np.float32),
         safe_h_max=2.0,
-        safe_q_max=3.5,
+        safe_q_max=3.2,
         safe_qf_max=np.array([1.0, 1.2, 1.1], dtype=np.float32),
         safety_penalty=10.0,
         early_completion_bonus=1.3,
