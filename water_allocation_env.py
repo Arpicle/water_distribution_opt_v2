@@ -74,7 +74,7 @@ class WaterAllocationEnv:
 
     @property
     def obs_dim(self) -> int:
-        return self.num_channels + self.horizon * self.num_channels * 3 + 1
+        return self.num_channels * 2 + self.horizon * self.num_channels * 3 + 1
 
     @property
     def action_dim(self) -> int:
@@ -130,6 +130,8 @@ class WaterAllocationEnv:
         oversupply_penalty_value = self.config.oversupply_penalty * oversupply_ratio
         smoothness_penalty_value = self.config.smoothness_penalty * smoothness_cost
 
+        action_history_idx = min(max(self.current_step, 0), self.horizon - 1)
+        self.e_history[action_history_idx] = gate_action
         self.previous_action = gate_action.copy()
         self.current_step += 1
         next_demand = self._transition_demand(
@@ -318,6 +320,7 @@ class WaterAllocationEnv:
         )
         obs_parts = [
             self.current_demands / demand_scale,
+            self.previous_action,
             history_features,
             step_ratio,
         ]
@@ -329,21 +332,23 @@ class WaterAllocationEnv:
         gate_z, gate_q = self._get_gate_hydraulic_features()
         self.z_history[history_idx] = gate_z
         self.q_history[history_idx] = gate_q
-        self.e_history[history_idx] = self.previous_action
 
     def _get_masked_history_features(self) -> np.ndarray:
-        mask = self._build_history_mask()
-        z_features = self.z_history.reshape(-1) * mask
-        q_features = self.q_history.reshape(-1) * mask
-        e_features = self.e_history.reshape(-1) * mask
+        mask_hq, mask_e = self._build_history_masks()
+        z_features = self.z_history.reshape(-1) * mask_hq
+        q_features = self.q_history.reshape(-1) * mask_hq
+        e_features = self.e_history.reshape(-1) * mask_e
         return np.concatenate([z_features, q_features, e_features]).astype(np.float32)
 
-    def _build_history_mask(self) -> np.ndarray:
+    def _build_history_masks(self) -> tuple[np.ndarray, np.ndarray]:
         if self.horizon != 5 or self.num_channels != 3:
-            mask = np.zeros((self.horizon, self.num_channels), dtype=np.float32)
+            mask_hq = np.zeros((self.horizon, self.num_channels), dtype=np.float32)
+            mask_e = np.zeros((self.horizon, self.num_channels), dtype=np.float32)
             history_idx = min(max(self.current_step, 0), self.horizon - 1)
-            mask[history_idx] = 1.0
-            return mask.reshape(-1)
+            mask_hq[history_idx] = 1.0
+            if history_idx > 0:
+                mask_e[:history_idx] = 1.0
+            return mask_hq.reshape(-1), mask_e.reshape(-1)
 
         # masks = np.array(
         #     [
@@ -355,7 +360,7 @@ class WaterAllocationEnv:
         #     ],
         #     dtype=np.float32,
         # )
-        masks = np.array(
+        masks_hq = np.array(
             [
                 [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                 [0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -365,8 +370,18 @@ class WaterAllocationEnv:
             ],
             dtype=np.float32,
         )
+        masks_e = np.array(
+            [
+                [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0],
+                [1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0,],
+            ],
+            dtype=np.float32,
+        )
         history_idx = min(max(self.current_step, 0), self.horizon - 1)
-        return masks[history_idx]
+        return masks_hq[history_idx], masks_e[history_idx]
 
     def _get_gate_hydraulic_features(self) -> tuple[np.ndarray, np.ndarray]:
         if not isinstance(self.hydraulic_state, dict):
