@@ -74,7 +74,7 @@ class WaterAllocationEnv:
 
     @property
     def obs_dim(self) -> int:
-        return self.num_channels + self.horizon * self.num_channels * 3 + 1
+        return self.num_channels * 4 + self.horizon * self.num_channels + 1
 
     @property
     def action_dim(self) -> int:
@@ -311,6 +311,7 @@ class WaterAllocationEnv:
     def _get_obs(self) -> np.ndarray:
         demand_scale = max(self.config.demand_high, 1.0)
         self._update_state_history()
+        gate_z, gate_q = self._get_gate_hydraulic_features()
         history_features = self._get_masked_history_features()
         step_ratio = np.array(
             [self.current_step / max(self.horizon, 1)],
@@ -318,6 +319,9 @@ class WaterAllocationEnv:
         )
         obs_parts = [
             self.current_demands / demand_scale,
+            gate_z,
+            gate_q,
+            self.previous_action,
             history_features,
             step_ratio,
         ]
@@ -333,10 +337,8 @@ class WaterAllocationEnv:
 
     def _get_masked_history_features(self) -> np.ndarray:
         mask = self._build_history_mask()
-        z_features = self.z_history.reshape(-1) * mask
-        q_features = self.q_history.reshape(-1) * mask
         e_features = self.e_history.reshape(-1) * mask
-        return np.concatenate([z_features, q_features, e_features]).astype(np.float32)
+        return e_features.astype(np.float32)
 
     def _build_history_mask(self) -> np.ndarray:
         if self.horizon != 5 or self.num_channels != 3:

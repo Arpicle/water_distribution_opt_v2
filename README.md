@@ -7,7 +7,9 @@ This project is a minimal PPO example for water allocation over 5 decision perio
 - Each episode has 5 time steps.
 - Input state:
   - current water demand of `N` channels
-  - masked 5-step history of gate water levels, gate flows, and gate openings
+  - current gate water levels and gate flows
+  - previous gate openings
+  - masked 5-step history of gate openings
   - current time-step ratio
 - Output action:
   - PPO internally outputs normalized actions of `N` channels in `[0, 1]`
@@ -20,7 +22,7 @@ This project is a minimal PPO example for water allocation over 5 decision perio
 
 ## State history
 
-The policy receives current demand plus a masked 5-step history block. For each variable `Z`, `Q`, and `e`, the block has `horizon * N` values. With `horizon=5` and `N=3`, this is `15` values per variable and `45` history values in total. The old standalone `previous_gate_openings`, `gate_Z`, and `gate_Q` inputs are not duplicated outside this history block.
+The policy receives current demand, current gate water levels `Z`, current gate flows `Q`, previous gate openings, and a masked 5-step gate-opening history block. The history block has `horizon * N` values. With `horizon=5` and `N=3`, this is `15` gate-opening history values. Historical `Z/Q` blocks are maintained internally by the environment but are not included in the lite policy observation.
 
 ## Constraints and reward
 
