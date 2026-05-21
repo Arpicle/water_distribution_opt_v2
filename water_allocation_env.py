@@ -74,7 +74,7 @@ class WaterAllocationEnv:
 
     @property
     def obs_dim(self) -> int:
-        return self.num_channels * 4 + self.horizon * self.num_channels + 1
+        return self.num_channels * 3 + self.horizon * self.num_channels + 1
 
     @property
     def action_dim(self) -> int:
@@ -321,7 +321,6 @@ class WaterAllocationEnv:
             self.current_demands / demand_scale,
             gate_z,
             gate_q,
-            self.previous_action,
             history_features,
             step_ratio,
         ]
