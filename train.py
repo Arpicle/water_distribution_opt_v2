@@ -4,6 +4,7 @@ import argparse
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 import json
+import math
 from pathlib import Path
 from datetime import datetime
 
@@ -79,6 +80,7 @@ def _build_detailed_log_record(
     rollout_metrics: dict,
     loss_stats: dict,
     learning_rate: float,
+    lr_decay_type: str,
 ) -> dict:
     return {
         "iteration": iteration,
@@ -111,6 +113,7 @@ def _build_detailed_log_record(
         },
         "optimizer": {
             "learning_rate": learning_rate,
+            "lr_decay_type": lr_decay_type,
         },
     }
 
@@ -127,17 +130,24 @@ def _to_jsonable(value):
     return value
 
 
-def _linear_decay_learning_rate(
+def _compute_decayed_learning_rate(
     initial_lr: float,
     final_lr: float,
     iteration: int,
     total_iterations: int,
+    decay_type: str,
 ) -> float:
     if total_iterations <= 1:
         return final_lr
     progress = (iteration - 1) / (total_iterations - 1)
     progress = min(max(progress, 0.0), 1.0)
-    return initial_lr + progress * (final_lr - initial_lr)
+    if decay_type == "linear":
+        factor = 1.0 - progress
+    elif decay_type == "cosine":
+        factor = 0.5 * (1.0 + math.cos(math.pi * progress))
+    else:
+        raise ValueError("lr_decay_type must be 'linear' or 'cosine'.")
+    return final_lr + (initial_lr - final_lr) * factor
 
 
 def _set_optimizer_learning_rate(agent: PPOAgent, learning_rate: float) -> None:
@@ -568,11 +578,12 @@ def main() -> None:
 
     for iteration in range(start_iteration, args.train_iterations + 1):
         current_lr = (
-            _linear_decay_learning_rate(
+            _compute_decayed_learning_rate(
                 initial_lr=ppo_config.learning_rate,
                 final_lr=ppo_config.final_learning_rate,
                 iteration=iteration,
                 total_iterations=args.train_iterations,
+                decay_type=ppo_config.lr_decay_type,
             )
             if ppo_config.use_lr_decay
             else ppo_config.learning_rate
@@ -621,6 +632,7 @@ def main() -> None:
                     rollout_metrics,
                     stats,
                     actual_lr,
+                    ppo_config.lr_decay_type if ppo_config.use_lr_decay else "constant",
                 )
             log_file.write(
                 json.dumps(_to_jsonable(log_record), ensure_ascii=False) + "\n"
