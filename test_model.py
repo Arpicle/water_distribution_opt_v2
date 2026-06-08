@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import importlib.util
+import sys
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
 from pathlib import Path
@@ -9,7 +11,6 @@ from typing import Any
 import numpy as np
 import torch
 
-from ppo_agent import ActorCritic
 from simulation import hydraulic_simulator
 from water_allocation_env import WaterAllocationConfig, WaterAllocationEnv
 
@@ -19,6 +20,7 @@ class ModelSpec:
     run_dir: Path = Path("runs") / "your_run_dir"
     model_name: str | None = None
     name: str | None = None
+    code_dir: Path | None = None
 
 
 @dataclass
@@ -90,13 +92,13 @@ def resolve_device(device: str) -> torch.device:
     return torch.device(device)
 
 
-def load_env_config(run_dir: Path) -> WaterAllocationConfig:
+def load_env_config(run_dir: Path, config_cls=WaterAllocationConfig):
     config = _load_json(run_dir / "env_config.json")
     if config.get("channel_weights") is not None:
         config["channel_weights"] = np.asarray(config["channel_weights"], dtype=np.float32)
     if config.get("safe_qf_max") is not None:
         config["safe_qf_max"] = np.asarray(config["safe_qf_max"], dtype=np.float32)
-    return WaterAllocationConfig(**config)
+    return config_cls(**config)
 
 
 def find_model_file(run_dir: Path, model_name: str | None) -> Path:
@@ -122,24 +124,72 @@ def find_model_file(run_dir: Path, model_name: str | None) -> Path:
     raise FileNotFoundError(f"No .pt model/checkpoint file found in {run_dir}.")
 
 
-def infer_checkpoint_dims(model_path: Path) -> tuple[int | None, int | None]:
-    checkpoint = torch.load(model_path, map_location=torch.device("cpu"))
-    state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else None
-    if not isinstance(state_dict, dict):
-        return None, None
-    first_layer = state_dict.get("shared.0.weight")
-    actor_head = state_dict.get("actor_head.weight")
-    obs_dim = int(first_layer.shape[1]) if first_layer is not None else None
-    action_dim = int(actor_head.shape[0] // 2) if actor_head is not None else None
-    return obs_dim, action_dim
+def load_module_from_file(module_name: str, path: Path, extra_sys_path: Path | None = None):
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot import module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    added_path = str(extra_sys_path) if extra_sys_path is not None else None
+    if added_path is not None:
+        sys.path.insert(0, added_path)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if added_path is not None and sys.path and sys.path[0] == added_path:
+            sys.path.pop(0)
+    return module
 
 
-def load_model(run_dir: Path, model_path: Path, obs_dim: int, action_dim: int, device: str):
-    ppo_config = _load_json(run_dir / "ppo_config.json")
+def load_training_modules(model_spec: ModelSpec, model_idx: int):
+    run_dir = model_spec.run_dir.resolve()
+    code_dir = (model_spec.code_dir or model_spec.run_dir).resolve()
+    module_prefix = f"tested_model_{model_idx}"
+
+    ppo_agent_path = code_dir / "ppo_agent.py"
+    env_path = code_dir / "water_allocation_env.py"
+
+    if ppo_agent_path.exists():
+        ppo_module = load_module_from_file(
+            f"{module_prefix}_ppo_agent",
+            ppo_agent_path,
+            extra_sys_path=code_dir,
+        )
+    else:
+        import ppo_agent as ppo_module
+
+    if env_path.exists():
+        env_module = load_module_from_file(
+            f"{module_prefix}_water_allocation_env",
+            env_path,
+            extra_sys_path=code_dir,
+        )
+    else:
+        import water_allocation_env as env_module
+
+    return {
+        "run_dir": run_dir,
+        "code_dir": code_dir,
+        "ppo_module": ppo_module,
+        "env_module": env_module,
+        "ppo_agent_path": ppo_agent_path if ppo_agent_path.exists() else None,
+        "env_path": env_path if env_path.exists() else None,
+    }
+
+
+def load_model(
+    ppo_module,
+    ppo_config: dict[str, Any],
+    model_path: Path,
+    obs_dim: int,
+    action_dim: int,
+    device: str,
+):
     hidden_dim = int(ppo_config.get("hidden_dim", 128))
-
     torch_device = resolve_device(device)
-    model = ActorCritic(obs_dim, action_dim, hidden_dim=hidden_dim).to(torch_device)
+    actor_critic_cls = ppo_module.ActorCritic
+    model = actor_critic_cls(obs_dim, action_dim, hidden_dim=hidden_dim).to(torch_device)
+
     checkpoint = torch.load(model_path, map_location=torch_device)
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -148,11 +198,11 @@ def load_model(run_dir: Path, model_path: Path, obs_dim: int, action_dim: int, d
     else:
         raise ValueError(f"Unsupported model file format: {model_path}")
     model.eval()
-    return model, torch_device, ppo_config
+    return model, torch_device
 
 
-def build_test_data(env_config: WaterAllocationConfig, num_demands: int, seed_start: int) -> list[dict]:
-    env = WaterAllocationEnv(env_config, hydraulic_simulator=hydraulic_simulator)
+def build_test_data(env_cls, env_config, num_demands: int, seed_start: int) -> list[dict]:
+    env = env_cls(env_config, hydraulic_simulator=hydraulic_simulator)
     test_data = []
     for case_idx in range(num_demands):
         seed = seed_start + case_idx
@@ -168,7 +218,7 @@ def build_test_data(env_config: WaterAllocationConfig, num_demands: int, seed_st
 
 
 def reset_with_initial_demand(
-    env: WaterAllocationEnv,
+    env,
     seed: int,
     initial_demand: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -197,12 +247,13 @@ def select_action(model, obs: np.ndarray, device: torch.device, deterministic: b
 
 
 def run_one_case(
-    env: WaterAllocationEnv,
+    env,
     model,
     device: torch.device,
     seed: int,
     deterministic: bool,
     initial_demand: np.ndarray,
+    obs_dim: int,
 ) -> dict:
     if not deterministic:
         torch.manual_seed(seed)
@@ -210,6 +261,11 @@ def run_one_case(
             torch.cuda.manual_seed_all(seed)
 
     obs, initial_demand = reset_with_initial_demand(env, seed, initial_demand)
+    if obs.shape[0] != obs_dim:
+        raise ValueError(
+            f"The observation builder produced obs_dim={obs.shape[0]}, but this model expects obs_dim={obs_dim}. "
+            "Use the observation construction that matches this model's training version."
+        )
     done = False
     total_reward = 0.0
     steps = []
@@ -220,6 +276,11 @@ def run_one_case(
         obs_before = obs.copy()
         action = select_action(model, obs, device, deterministic)
         obs, reward, done, info = env.step(action)
+        if not done and obs.shape[0] != obs_dim:
+            raise ValueError(
+                f"The observation builder produced obs_dim={obs.shape[0]}, but this model expects obs_dim={obs_dim}. "
+                "Use the observation construction that matches this model's training version."
+            )
         total_reward += reward
 
         steps.append(
@@ -285,38 +346,43 @@ def main(config: TestConfig = CONFIG) -> None:
     if len(model_names) != len(set(model_names)):
         raise ValueError("Each model in CONFIG.models must have a unique name/model_name/run_dir name.")
 
-    demand_source_run_dir = config.models[0].run_dir.resolve()
-    demand_source_env_config = load_env_config(demand_source_run_dir)
-    test_data = build_test_data(demand_source_env_config, config.num_demands, config.seed)
+    demand_source_modules = load_training_modules(config.models[0], 0)
+    demand_source_run_dir = demand_source_modules["run_dir"]
+    demand_source_env_module = demand_source_modules["env_module"]
+    demand_source_env_config = load_env_config(
+        demand_source_run_dir,
+        demand_source_env_module.WaterAllocationConfig,
+    )
+    test_data = build_test_data(
+        demand_source_env_module.WaterAllocationEnv,
+        demand_source_env_config,
+        config.num_demands,
+        config.seed,
+    )
 
     model_results = {}
     model_metadata = {}
     for model_idx, model_spec in enumerate(config.models):
-        run_dir = model_spec.run_dir.resolve()
-        env_config = load_env_config(run_dir)
-        env = WaterAllocationEnv(env_config, hydraulic_simulator=hydraulic_simulator)
+        model_modules = load_training_modules(model_spec, model_idx)
+        run_dir = model_modules["run_dir"]
+        code_dir = model_modules["code_dir"]
+        ppo_module = model_modules["ppo_module"]
+        env_module = model_modules["env_module"]
+        ppo_config = _load_json(run_dir / "ppo_config.json")
+        env_config = load_env_config(run_dir, env_module.WaterAllocationConfig)
+        env = env_module.WaterAllocationEnv(env_config, hydraulic_simulator=hydraulic_simulator)
         model_path = find_model_file(run_dir, model_spec.model_name)
         model_name = model_spec.name or model_path.stem
-        expected_obs_dim, expected_action_dim = infer_checkpoint_dims(model_path)
-        if expected_obs_dim is not None and expected_obs_dim != env.obs_dim:
-            raise ValueError(
-                f"Model '{model_name}' expects obs_dim={expected_obs_dim}, "
-                f"but its own env_config builds obs_dim={env.obs_dim}. "
-                "Check that the model folder contains the matching env_config.json."
-            )
-        if expected_action_dim is not None and expected_action_dim != env.action_dim:
-            raise ValueError(
-                f"Model '{model_name}' expects action_dim={expected_action_dim}, "
-                f"but its own env_config builds action_dim={env.action_dim}. "
-                "Check that the model folder contains the matching env_config.json."
-            )
+        obs_dim = env.obs_dim
+        action_dim = env.action_dim
 
         print(f"\n=== Testing {model_name} ({model_idx + 1}/{len(config.models)}) ===")
-        model, device, ppo_config = load_model(
-            run_dir,
+        model, device = load_model(
+            ppo_module,
+            ppo_config,
             model_path,
-            env.obs_dim,
-            env.action_dim,
+            obs_dim,
+            action_dim,
             config.device,
         )
 
@@ -333,6 +399,7 @@ def main(config: TestConfig = CONFIG) -> None:
                     seed,
                     config.deterministic,
                     np.asarray(case["initial_demand"], dtype=np.float32),
+                    obs_dim,
                 )
             )
 
@@ -342,11 +409,14 @@ def main(config: TestConfig = CONFIG) -> None:
         }
         model_metadata[model_name] = {
             "run_dir": run_dir,
+            "code_dir": code_dir,
             "model_path": model_path,
+            "ppo_agent_path": model_modules["ppo_agent_path"],
+            "water_allocation_env_path": model_modules["env_path"],
             "env_config": env_config,
             "ppo_config": ppo_config,
-            "obs_dim": env.obs_dim,
-            "action_dim": env.action_dim,
+            "obs_dim": obs_dim,
+            "action_dim": action_dim,
         }
 
     output_dir = config.output_dir or demand_source_run_dir
