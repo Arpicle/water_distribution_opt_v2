@@ -11,9 +11,6 @@ from typing import Any
 import numpy as np
 import torch
 
-from simulation import hydraulic_simulator
-from water_allocation_env import WaterAllocationConfig, WaterAllocationEnv
-
 
 @dataclass
 class ModelSpec:
@@ -92,7 +89,12 @@ def resolve_device(device: str) -> torch.device:
     return torch.device(device)
 
 
-def load_env_config(run_dir: Path, config_cls=WaterAllocationConfig):
+def load_env_config(run_dir: Path, config_cls=None):
+    if config_cls is None:
+        from water_allocation_env import WaterAllocationConfig
+
+        config_cls = WaterAllocationConfig
+
     config = _load_json(run_dir / "env_config.json")
     if config.get("channel_weights") is not None:
         config["channel_weights"] = np.asarray(config["channel_weights"], dtype=np.float32)
@@ -141,39 +143,65 @@ def load_module_from_file(module_name: str, path: Path, extra_sys_path: Path | N
     return module
 
 
+def find_first_existing_path(paths: list[Path]) -> Path | None:
+    for path in paths:
+        if path.exists():
+            return path
+    return None
+
+
+def load_required_project_module(
+    module_name: str,
+    candidate_paths: list[Path],
+    extra_sys_path: Path,
+):
+    module_path = find_first_existing_path(candidate_paths)
+    if module_path is None:
+        checked = "\n".join(f"  - {path}" for path in candidate_paths)
+        raise FileNotFoundError(
+            f"Cannot find required module '{module_name}.py'. Checked:\n{checked}"
+        )
+    return load_module_from_file(module_name, module_path, extra_sys_path=extra_sys_path), module_path
+
+
 def load_training_modules(model_spec: ModelSpec, model_idx: int):
     run_dir = model_spec.run_dir.resolve()
     code_dir = (model_spec.code_dir or model_spec.run_dir).resolve()
+    script_dir = Path(__file__).resolve().parent
     module_prefix = f"tested_model_{model_idx}"
 
-    ppo_agent_path = code_dir / "ppo_agent.py"
-    env_path = code_dir / "water_allocation_env.py"
+    simulation_module, simulation_path = load_required_project_module(
+        "simulation",
+        [code_dir / "simulation.py", run_dir / "simulation.py", script_dir / "simulation.py"],
+        code_dir,
+    )
+    sys.modules["simulation"] = simulation_module
 
-    if ppo_agent_path.exists():
-        ppo_module = load_module_from_file(
-            f"{module_prefix}_ppo_agent",
-            ppo_agent_path,
-            extra_sys_path=code_dir,
-        )
-    else:
-        import ppo_agent as ppo_module
+    ppo_module, ppo_agent_path = load_required_project_module(
+        f"{module_prefix}_ppo_agent",
+        [code_dir / "ppo_agent.py", run_dir / "ppo_agent.py", script_dir / "ppo_agent.py"],
+        code_dir,
+    )
 
-    if env_path.exists():
-        env_module = load_module_from_file(
-            f"{module_prefix}_water_allocation_env",
-            env_path,
-            extra_sys_path=code_dir,
-        )
-    else:
-        import water_allocation_env as env_module
+    env_module, env_path = load_required_project_module(
+        f"{module_prefix}_water_allocation_env",
+        [
+            code_dir / "water_allocation_env.py",
+            run_dir / "water_allocation_env.py",
+            script_dir / "water_allocation_env.py",
+        ],
+        code_dir,
+    )
 
     return {
         "run_dir": run_dir,
         "code_dir": code_dir,
         "ppo_module": ppo_module,
         "env_module": env_module,
-        "ppo_agent_path": ppo_agent_path if ppo_agent_path.exists() else None,
-        "env_path": env_path if env_path.exists() else None,
+        "simulation_module": simulation_module,
+        "ppo_agent_path": ppo_agent_path,
+        "env_path": env_path,
+        "simulation_path": simulation_path,
     }
 
 
@@ -201,7 +229,7 @@ def load_model(
     return model, torch_device
 
 
-def build_test_data(env_cls, env_config, num_demands: int, seed_start: int) -> list[dict]:
+def build_test_data(env_cls, env_config, hydraulic_simulator, num_demands: int, seed_start: int) -> list[dict]:
     env = env_cls(env_config, hydraulic_simulator=hydraulic_simulator)
     test_data = []
     for case_idx in range(num_demands):
@@ -349,6 +377,7 @@ def main(config: TestConfig = CONFIG) -> None:
     demand_source_modules = load_training_modules(config.models[0], 0)
     demand_source_run_dir = demand_source_modules["run_dir"]
     demand_source_env_module = demand_source_modules["env_module"]
+    demand_source_hydraulic_simulator = demand_source_modules["simulation_module"].hydraulic_simulator
     demand_source_env_config = load_env_config(
         demand_source_run_dir,
         demand_source_env_module.WaterAllocationConfig,
@@ -356,6 +385,7 @@ def main(config: TestConfig = CONFIG) -> None:
     test_data = build_test_data(
         demand_source_env_module.WaterAllocationEnv,
         demand_source_env_config,
+        demand_source_hydraulic_simulator,
         config.num_demands,
         config.seed,
     )
@@ -368,6 +398,7 @@ def main(config: TestConfig = CONFIG) -> None:
         code_dir = model_modules["code_dir"]
         ppo_module = model_modules["ppo_module"]
         env_module = model_modules["env_module"]
+        hydraulic_simulator = model_modules["simulation_module"].hydraulic_simulator
         ppo_config = _load_json(run_dir / "ppo_config.json")
         env_config = load_env_config(run_dir, env_module.WaterAllocationConfig)
         env = env_module.WaterAllocationEnv(env_config, hydraulic_simulator=hydraulic_simulator)
@@ -413,6 +444,7 @@ def main(config: TestConfig = CONFIG) -> None:
             "model_path": model_path,
             "ppo_agent_path": model_modules["ppo_agent_path"],
             "water_allocation_env_path": model_modules["env_path"],
+            "simulation_path": model_modules["simulation_path"],
             "env_config": env_config,
             "ppo_config": ppo_config,
             "obs_dim": obs_dim,
